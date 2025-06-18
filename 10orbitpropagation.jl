@@ -517,9 +517,9 @@ function main_simulation(
 
     f_true_c_init_calc=M_c_stm_init
     if abs(e_c_stm_init)>1e-9; E_approx_calc=M_c_stm_init+e_c_stm_init*sin(M_c_stm_init); if abs(1.0-e_c_stm_init)>1e-9; tan_E_half_calc=tan(E_approx_calc/2.0); if abs(1.0-e_c_stm_init)<1e-9; f_true_c_init_calc=E_approx_calc; else; sqrt_term_calc=sqrt(abs((1.0+e_c_stm_init)/(1.0-e_c_stm_init))); f_true_c_init_calc=2.0*atan(sqrt_term_calc*tan_E_half_calc); end; else; f_true_c_init_calc=E_approx_calc; end; f_true_c_init_calc=mod(f_true_c_init_calc,2*pi); if f_true_c_init_calc<0; f_true_c_init_calc+=2*pi; end; end
-    posvel_chief_init_eci = elements_to_cartesian_matlab_style(a_c_stm_init,e_c_stm_init,i_c_stm_init,Omega_c_stm_init,omega_c_stm_init,f_true_c_init_calc,mu_earth)
-    r_chief_init_eci=SVector{3}(posvel_chief_init_eci[1:3]); v_chief_init_eci=SVector{3}(posvel_chief_init_eci[4:6])
-    oe_chief_eval=cartesian_to_elements_matlab_style(posvel_chief_init_eci,mu_earth)
+    posvel_chief_initial_eci_vec = elements_to_cartesian_matlab_style(a_c_stm_init,e_c_stm_init,i_c_stm_init,Omega_c_stm_init,omega_c_stm_init,f_true_c_init_calc,mu_earth)
+    r_chief_init_eci=SVector{3}(posvel_chief_initial_eci_vec[1:3]); v_chief_init_eci=SVector{3}(posvel_chief_initial_eci_vec[4:6])
+    oe_chief_eval=cartesian_to_elements_matlab_style(posvel_chief_initial_eci_vec,mu_earth)
 
     optimal_angle_deg=-1.0; min_cost=Inf; angles_plot_list=Float64[]
     roe_data_log=Dict(
@@ -560,7 +560,7 @@ function main_simulation(
         if !include_drag_active_stm; roe_aug_init_vec_temp[7]=0.0; end
         roe_aug_init_vec=SVector(roe_aug_init_vec_temp)
         
-        # ★★★ 伝播時間を固定値に設定 ★★★
+        # ★★★ 伝播時間を全てのケースで固定値に設定 ★★★
         tf_val = fixed_propagation_time
         push!(angles_plot_list,angle_val)
         push!(roe_data_log[:t_final],tf_val)
@@ -570,22 +570,20 @@ function main_simulation(
         f_true_chief_tf_calc=oe_chief_at_tf.M; if abs(oe_chief_at_tf.e)>1e-9; E_approx_tf_calc=oe_chief_at_tf.M+oe_chief_at_tf.e*sin(oe_chief_at_tf.M); if abs(1.0-oe_chief_at_tf.e)>1e-9; tan_E_half_tf_calc=tan(E_approx_tf_calc/2.0); if abs(1.0-oe_chief_at_tf.e)<1e-9; f_true_chief_tf_calc=E_approx_tf_calc; else; sqrt_term_tf_calc=sqrt(abs((1.0+oe_chief_at_tf.e)/(1.0-oe_chief_at_tf.e))); f_true_chief_tf_calc=2.0*atan(sqrt_term_tf_calc*tan_E_half_tf_calc); end; else; f_true_chief_tf_calc=E_approx_tf_calc; end; f_true_chief_tf_calc=mod(f_true_chief_tf_calc,2*pi); if f_true_chief_tf_calc<0; f_true_chief_tf_calc+=2*pi; end; end
         oe_chief_at_tf=OrbitalElementsClassical(oe_chief_at_tf.a,oe_chief_at_tf.e,oe_chief_at_tf.i,oe_chief_at_tf.RAAN,oe_chief_at_tf.omega,f_true_chief_tf_calc,oe_chief_at_tf.n,oe_chief_at_tf.M)
         omega_c_tf_val=oe_chief_at_tf.omega; J_ti=get_J_qns_augmented_koenig(omega_c_ti); J_tf_inv=get_J_qns_inv_augmented_koenig(omega_c_tf_val); roe_prime_init=J_ti*roe_aug_init_vec
-
-        # プラント行列の各成分を個別に取得
+        
+        # ★★★ 修正箇所: 不要な引数 delta_B_initial_param を削除 ★★★
         A_kep_p, A_j2_p, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(
             oe_chief_eval.a, oe_chief_eval.e, oe_chief_eval.i, omega_c_ti, 
             include_j2_active, include_drag_active_stm, drag_model_setting
         )
         
-        # 分離されたプラント行列をSTM計算関数に渡す
         STM_prime = get_STM_prime_qns_augmented_koenig_model_selectable(
             A_kep_p, A_j2_p, A_drag_p, 
             tf_val, 
             include_drag_active_stm, drag_model_setting
         )
-        
-        roe_prime_final=STM_prime*roe_prime_init
-        roe_aug_final_vec=J_tf_inv*roe_prime_final
+
+        roe_prime_final=STM_prime*roe_prime_init; roe_aug_final_vec=J_tf_inv*roe_prime_final
         push!(roe_data_log[:final_delta_a],roe_aug_final_vec[1]); push!(roe_data_log[:final_delta_lambda],rad2deg(roe_aug_final_vec[2])); push!(roe_data_log[:final_delta_ex],roe_aug_final_vec[3]); push!(roe_data_log[:final_delta_ey],roe_aug_final_vec[4]); push!(roe_data_log[:final_delta_ix],rad2deg(roe_aug_final_vec[5])); push!(roe_data_log[:final_delta_iy],rad2deg(roe_aug_final_vec[6]))
         
         # ★★★ 新しいコスト関数の定義 ★★★
