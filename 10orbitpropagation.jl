@@ -180,16 +180,16 @@ end
 function get_STM_prime_qns_augmented_koenig_model_selectable(A_kep_prime::SMatrix{7,7,Float64}, A_j2_prime::SMatrix{7,7,Float64}, A_drag_prime::SMatrix{7,7,Float64}, t_prop::Float64, ec_val_for_drag_effect::Float64, include_drag_effects::Bool, drag_model_type::DragModelTypeForSTM)::SMatrix{7,7,Float64}
     A_kep_J2_prime=A_kep_prime+A_j2_prime
     if drag_model_type == DENSITY_MODEL_FREE && include_drag_effects
-        # Part A: 抗力のみの一次効果
-        Phi_drag_prime = SMatrix{7,7,Float64}(I) + A_drag_prime * t_prop
-        
-        # ★★★ デバッグのため、結合項(Part B:J2摂動と差動抗力の相乗効果部)を一時的に無効化 ★★★
-        # Part B: 結合効果
-        # Integral_Phi_drag_prime = SMatrix{7,7,Float64}(I) * t_prop + A_drag_prime * (t_prop^2 / 2.0)
-        # CouplingTerm_B = A_kep_J2_prime * Integral_Phi_drag_prime
-        
-        # return Phi_drag_prime + CouplingTerm_B
-        return Phi_drag_prime # Part A のみで結果を返す
+    Phi_drag_prime = SMatrix{7,7,Float64}(I) + A_drag_prime * t_prop
+
+    # TODO: 結合項を有効にするとDRAG_ONLYケースで発散する問題がある。
+    #       A_kep_J2_prime と Integral_Phi_drag_prime の積の計算、
+    #       または A_drag_p の定義を再検証する必要がある。
+    # Integral_Phi_drag_prime = SMatrix{7,7,Float64}(I) * t_prop + A_drag_prime * (t_prop^2 / 2.0)
+    # CouplingTerm_B = A_kep_J2_prime * Integral_Phi_drag_prime
+    # return Phi_drag_prime + CouplingTerm_B
+
+    return Phi_drag_prime # 現在は結合項を無効化して暫定対応
     elseif drag_model_type==DENSITY_MODEL_SPECIFIC&&include_drag_effects; println("警告: DENSITY_MODEL_SPECIFIC のSTM計算は未実装です。"); return SMatrix{7,7,Float64}(I)+(A_kep_J2_prime+A_drag_prime)*t_prop
     else; return SMatrix{7,7,Float64}(I)+A_kep_J2_prime*t_prop; end
 end
