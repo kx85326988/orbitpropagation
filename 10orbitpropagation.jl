@@ -5,6 +5,7 @@ using Printf
 using Base64
 using Dates
 using Statistics
+using SatelliteToolbox 
 
 # --- 物理定数 ---
 const mu_earth = 3.986004418e14  # 地心重力定数 (m^3/s^2)
@@ -12,12 +13,12 @@ const J2_coeff = 1.08263e-3     # J2係数
 const R_E = 6378137.0            # 地球半径 (m)
 
 # --- 主衛星の初期軌道要素 ---
-a_c_stm_init = 6903137.0        # (投入予定軌道：近地点、遠地点高度：540km ± 15kmから計算)
-e_c_stm_init = 0.0022           # 0~0.0022(投入予定軌道：近地点、遠地点高度：540km ± 15kmから計算)
-i_c_stm_init = deg2rad(97.65)   # (投入予定軌道：軌道傾斜角：97.50 ± 0.15 degから計算)
+a_c_stm_init = 6903137.0        # m
+e_c_stm_init = 0.0022           #
+i_c_stm_init = deg2rad(97.65)   #
 Omega_c_stm_init = deg2rad(0.0) #
 omega_c_stm_init = deg2rad(0.0) #
-M_c_stm_init = deg2rad(0.0)     # 
+M_c_stm_init = deg2rad(0.0)     #
 
 # --- 編隊飛行関連パラメータ ---
 delta_v_magnitude = 0.1 # m/s
@@ -25,11 +26,13 @@ delta_a_dot_drag_initial_normalized = -1.0e-7 # [1/s]
 delta_B_initial_param = 0.01 # 仮の差動弾道係数
 
 # --- 構造体定義 ---
+# プログラム内で一貫して使用するためのカスタム構造体
 struct OrbitalElementsClassical
     a::Float64; e::Float64; i::Float64; RAAN::Float64
     omega::Float64; f_true::Float64; n::Float64; M::Float64
 end
 
+# ECI状態を渡すためのカスタム構造体
 struct CartesianStateECI
     r_vec::SVector{3, Float64}
     v_vec::SVector{3, Float64}
@@ -44,85 +47,45 @@ end
 @enum DragModelTypeForSTM begin NO_DRAG; DENSITY_MODEL_FREE; DENSITY_MODEL_SPECIFIC end
 @enum SeparationPlane begin RT_PLANE; RN_PLANE; NT_PLANE end
 
-# --- ヘルパー関数 ---
-function cartesian_to_elements_matlab_style(posvel0_vec::SVector{6, Float64}, GM_e::Float64)::OrbitalElementsClassical
-    r_vec = posvel0_vec[1:3]; v_vec = posvel0_vec[4:6]
-    R_mag = norm(r_vec); v_sq = dot(v_vec, v_vec)
-    a = GM_e / ((2 * GM_e / R_mag) - v_sq)
-    if a < 0 && abs( (2 * GM_e / R_mag) - v_sq ) > 1e-9;
-    elseif abs( (2 * GM_e / R_mag) - v_sq ) < 1e-9; a = Inf; end
-
-    h_vec = cross(r_vec, v_vec); h_mag = norm(h_vec)
-    if h_mag < 1e-9; h_mag = 1e-9; end
-    i = acos(clamp(h_vec[3] / h_mag, -1.0, 1.0))
-    node_vec = SVector(-h_vec[2], h_vec[1], 0.0); node_mag = norm(node_vec)
-    RAAN = 0.0
-    if node_mag > 1e-9 && abs(i) > 1e-9 && abs(i - pi) > 1e-9
-        RAAN = atan(node_vec[2], node_vec[1]); if RAAN < 0.0; RAAN += 2*pi; end
-    end
-    e_vec = (1/GM_e) * ( (v_sq - GM_e/R_mag)*r_vec - dot(r_vec, v_vec)*v_vec )
-    e = norm(e_vec); if e < 1e-10; e = 1e-10; end
-    omega = 0.0
-    if e > 1e-9
-        if node_mag > 1e-9
-            cos_omega_val = dot(node_vec, e_vec) / (node_mag * e)
-            omega = acos(clamp(cos_omega_val, -1.0, 1.0))
-            if e_vec[3] < 0.0; omega = 2*pi - omega; end
-        else
-            omega = atan(e_vec[2], e_vec[1]); if omega < 0.0; omega += 2*pi; end
-        end
-    end
-    f_true = 0.0
-    if e > 1e-9
-        cos_f_val = dot(e_vec, r_vec) / (e * R_mag)
-        f_true = acos(clamp(cos_f_val, -1.0, 1.0))
-        if dot(r_vec, v_vec) < 0.0; f_true = 2*pi - f_true; end
-    else
-        if node_mag > 1e-9 && abs(i) > 1e-9 && abs(i-pi) > 1e-9
-            cos_u_val = dot(normalize(node_vec), normalize(r_vec))
-            u_angle = acos(clamp(cos_u_val, -1.0, 1.0))
-            if dot(h_vec, cross(node_vec, r_vec)) < 0.0; u_angle = 2*pi - u_angle; end
-            f_true = u_angle
-        else
-            f_true = atan(r_vec[2], r_vec[1]); if f_true < 0.0; f_true += 2*pi; end
-        end
-    end
-    f_true = mod(f_true, 2*pi)
-    n_val = sqrt(GM_e / abs(a)^3)
-    E_anom = 0.0
-    if e < 1.0 - 1e-9
-        tan_f_half = tan(f_true/2.0)
-        sqrt_term_val = (1.0-e)/(1.0+e); if sqrt_term_val < 0; sqrt_term_val = 0; end
-        E_anom = 2.0 * atan(sqrt(sqrt_term_val) * tan_f_half)
-    end
-    E_anom = mod(E_anom, 2*pi); if E_anom < 0.0; E_anom += 2*pi; end
-    M = 0.0
-    if e < 1.0 - 1e-9; M = E_anom - e * sin(E_anom); end
-    M = mod(M, 2*pi); if M < 0.0; M += 2*pi; end
-    return OrbitalElementsClassical(a, e, i, RAAN, omega, f_true, n_val, M)
+"""
+ECI座標系の位置・速度ベクトルから古典軌道要素を計算する (SatelliteToolbox.jlを使用)。
+"""
+function sv_to_orbital_elements(state::CartesianStateECI, epoch::Float64 = 0.0)::OrbitalElementsClassical
+    # ★★★ 修正: OrbitStateVector構造体を作成してsv_to_keplerに渡す ★★★
+    # OrbitStateVectorは 時刻, 位置ベクトル, 速度ベクトル を引数に取る
+    sv = OrbitStateVector(epoch, state.r_vec, state.v_vec)
+    
+    # sv_to_keplerはOrbitStateVectorを引数に取り、KeplerianElementsを返す
+    # muは内部でデフォルト値が使われる
+    kep = SatelliteToolbox.sv_to_kepler(sv)
+    
+    # fからMを計算
+    M_val = SatelliteToolbox.true_to_mean_anomaly(kep.e, kep.f)
+    
+    # nをaから手動で計算 (KeplerianElements構造体はnを含まないため)
+    n_val = sqrt(mu_earth / kep.a^3)
+    
+    return OrbitalElementsClassical(
+        kep.a, kep.e, kep.i, kep.Ω, kep.ω, kep.f,
+        n_val, # 計算したnを使用
+        M_val
+    )
 end
 
-function euler_rotation(angle_rad::Float64, axis::Int)::SMatrix{3,3,Float64}
-    c=cos(angle_rad); s=sin(angle_rad)
-    if axis==1; return @SMatrix [1 0 0; 0 c s; 0 -s c];
-    elseif axis==2; return @SMatrix [c 0 -s; 0 1 0; s 0 c];
-    else return @SMatrix [c s 0; -s c 0; 0 0 1]; end
-end
-
-function elements_to_cartesian_matlab_style(a::Float64, e::Float64, i_rad::Float64, RAAN_rad::Float64, omega_rad::Float64, f_true_rad::Float64, GM_e::Float64)::SVector{6,Float64}
-    if e<0.0||e>=1.0-1e-9; if e<1e-9; e=1e-9; end; if e>=1.0-1e-9; e=1.0-1e-9; end; end
-    if a<=0.0&&abs(a)>1e-9&&a!=Inf; error("a must be positive. Got a=$a");
-    elseif abs(a)<1e-9&&a!=Inf; error("a is too small. Got a=$a"); end
-    p_val=a*(1.0-e^2); if p_val<1e-6&&a!=Inf; p_val=1e-6; end
-    if isinf(a); p_val=2*norm(cross(elements_to_cartesian_matlab_style(a,e,i_rad,RAAN_rad,omega_rad,f_true_rad,GM_e)[1:3], elements_to_cartesian_matlab_style(a,e,i_rad,RAAN_rad,omega_rad,f_true_rad,GM_e)[4:6]))^2/GM_e; end
-    r_norm_pqw=p_val/(1.0+e*cos(f_true_rad))
-    r_pqw=SVector(r_norm_pqw*cos(f_true_rad),r_norm_pqw*sin(f_true_rad),0.0)
-    v_pqw_x=-sqrt(GM_e/p_val)*sin(f_true_rad); v_pqw_y=sqrt(GM_e/p_val)*(e+cos(f_true_rad))
-    v_pqw=SVector(v_pqw_x,v_pqw_y,0.0)
-    Rot3_neg_w=euler_rotation(-omega_rad,3); Rot1_neg_i=euler_rotation(-i_rad,1); Rot3_neg_RAAN=euler_rotation(-RAAN_rad,3)
-    DCM_pqw_to_eci=Rot3_neg_RAAN*Rot1_neg_i*Rot3_neg_w
-    r_eci=DCM_pqw_to_eci*r_pqw; v_eci=DCM_pqw_to_eci*v_pqw
-    return vcat(r_eci,v_eci)
+"""
+カスタムのOrbitalElementsClassical構造体からECI座標系の位置・速度ベクトルを計算する。
+"""
+function orbital_elements_to_sv(oe::OrbitalElementsClassical, epoch::Float64 = 0.0)::SVector{6,Float64}
+    # Mからfへの変換
+    f_true_val = SatelliteToolbox.mean_to_true_anomaly(oe.e, oe.M)
+    
+    # SatelliteToolbox.jlのKeplerianElements構造体を作成
+    keps = KeplerianElements(epoch, oe.a, oe.e, oe.i, oe.RAAN, oe.omega, f_true_val)
+    
+    # kepler_to_svはKeplerianElementsを引数に取る
+    sv_out = SatelliteToolbox.kepler_to_sv(keps)
+    
+    return vcat(sv_out.r, sv_out.v)
 end
 
 function cw_to_eci_deputy_state(r_chief_eci::SVector{3,Float64}, v_chief_eci::SVector{3,Float64}, dr_lvlh::SVector{3,Float64}, dv_lvlh::SVector{3,Float64})::CartesianStateECI
@@ -167,14 +130,9 @@ function final_roe_to_deputy_oe(oe_chief_final::OrbitalElementsClassical, final_
     X=delta_ex_val+ec*cos(omegac); Y=delta_ey_val+ec*sin(omegac); ed=sqrt(X^2+Y^2); if ed<1e-10; ed=1e-10; end
     omegad=0.0; if ed>1e-9; omegad=atan(Y,X); if omegad<0.0; omegad+=2*pi; end; end
     Md=delta_lambda_val+(Mc+omegac+Omegac*cos(ic))-(omegad+Omegad*cos(id)); Md=mod(Md,2*pi); if Md<0.0; Md+=2*pi; end
-    nd=sqrt(mu_earth/abs(ad)^3); f_true_d_approx=Md
-    if abs(ed)>1e-9
-        E_approx_d=Md+ed*sin(Md)
-        if abs(1.0-ed)>1e-9; tan_E_half_d=tan(E_approx_d/2.0); if abs(1.0-ed)<1e-9; f_true_d_approx=E_approx_d; else; sqrt_term_d=sqrt(abs((1.0+ed)/(1.0-ed))); f_true_d_approx=2.0*atan(sqrt_term_d*tan_E_half_d); end
-        else; f_true_d_approx=E_approx_d; end
-        f_true_d_approx=mod(f_true_d_approx,2*pi); if f_true_d_approx<0; f_true_d_approx+=2*pi; end
-    end
-    return OrbitalElementsClassical(ad,ed,id,Omegad,omegad,f_true_d_approx,nd,Md)
+    nd=sqrt(mu_earth/abs(ad)^3)
+    f_true_d_val = SatelliteToolbox.mean_to_true_anomaly(ed, Md)
+    return OrbitalElementsClassical(ad,ed,id,Omegad,omegad,f_true_d_val,nd,Md)
 end
 
 function get_secular_j2_rates_koenig(ac::Float64, ec::Float64, ic::Float64)::Tuple{Float64,Float64}
@@ -198,21 +156,9 @@ function get_J_qns_inv_augmented_koenig(omega_c_val::Float64)::SMatrix{7,7,Float
     return SMatrix(J_inv_aug)
 end
 
-function get_A_prime_qns_augmented_koenig_selectable(
-    ac_val::Float64, ec_val::Float64, ic_val::Float64, omegac_val::Float64, 
-    include_j2::Bool, include_drag_effects::Bool, drag_model_type::DragModelTypeForSTM
-)::Tuple{SMatrix{7,7,Float64}, SMatrix{7,7,Float64}, SMatrix{7,7,Float64}}
-    
-    A_kep_p = @MMatrix zeros(Float64,7,7)
-    A_j2_p = @MMatrix zeros(Float64,7,7)
-    A_drag_p = @MMatrix zeros(Float64,7,7)
-    
-    n_c = sqrt(mu_earth / ac_val^3)
-
-    # 1. ケプラー項
-    A_kep_p[2,1] = -1.5 * n_c
-
-    # 2. J2摂動項
+function get_A_prime_qns_augmented_koenig_selectable(ac_val::Float64, ec_val::Float64, ic_val::Float64, omegac_val::Float64, include_j2::Bool, include_drag_effects::Bool, drag_model_type::DragModelTypeForSTM)::Tuple{SMatrix{7,7,Float64}, SMatrix{7,7,Float64}, SMatrix{7,7,Float64}}
+    A_kep_p=@MMatrix zeros(Float64,7,7); A_j2_p=@MMatrix zeros(Float64,7,7); A_drag_p=@MMatrix zeros(Float64,7,7)
+    n_c=sqrt(mu_earth/ac_val^3); A_kep_p[2,1]=-1.5*n_c
     if include_j2
         eta_c=sqrt(1.0-ec_val^2); if eta_c<1e-9; eta_c=1e-9; end
         kappa_J2=(3.0/4.0)*J2_coeff*(R_E^2*sqrt(mu_earth))/(ac_val^(3.5)*eta_c^4)
@@ -220,55 +166,32 @@ function get_A_prime_qns_augmented_koenig_selectable(
         cos_i=cos(ic_val); sin_i=sin(ic_val)
         P_g=3.0*cos_i^2-1.0; Q_g=5.0*cos_i^2-1.0; S_g=sin(2.0*ic_val); T_g=sin_i^2
         ex_c=ec_val*cos(omegac_val); ey_c=ec_val*sin(omegac_val)
-        
-        A_j2_p[2,1] = -0.5*kappa_J2*E_f*P_g
-        A_j2_p[2,3] = kappa_J2*F_f*G_f*ex_c
-        A_j2_p[2,4] = kappa_J2*F_f*G_f*ey_c
-        A_j2_p[2,5] = -kappa_J2*F_f*S_g
-        A_j2_p[3,4] = -kappa_J2*Q_g
-        A_j2_p[3,5] = kappa_J2*Q_g*G_f*ey_c
-        A_j2_p[4,3] = kappa_J2*Q_g
-        A_j2_p[4,5] = -kappa_J2*Q_g*G_f*ex_c
-        A_j2_p[6,1] = 0.5*kappa_J2*S_g
-        A_j2_p[6,3] = -kappa_J2*G_f*S_g*ex_c
-        A_j2_p[6,4] = -kappa_J2*G_f*S_g*ey_c
-        A_j2_p[6,5] = kappa_J2*T_g
+        A_j2_p[2,1]=-3.5*kappa_J2*E_f*P_g; A_j2_p[2,3]=kappa_J2*F_f*G_f*ec_val*P_g; A_j2_p[2,5]=-kappa_J2*F_f*S_g
+        A_j2_p[4,1]=-3.5*kappa_J2*ec_val*Q_g; A_j2_p[4,3]=4*kappa_J2*Q_g*G_f*ec_val^2; A_j2_p[4,5]=-5*kappa_J2*ec_val*S_g
+        A_j2_p[6,1]=3.5*kappa_J2*S_g; A_j2_p[6,3]=-4*kappa_J2*G_f*S_g*ec_val; A_j2_p[6,5]=2*kappa_J2*T_g
     end
-
-    # 3. 差動抗力項
     if include_drag_effects
-        if drag_model_type == DENSITY_MODEL_FREE
-            A_drag_p[1,7] = 1.0
-            A_drag_p[3,7] = (1.0 - ec_val)
-        elseif drag_model_type == DENSITY_MODEL_SPECIFIC
-            println("警告: DENSITY_MODEL_SPECIFIC のプラント行列は未実装です。")
-        end
+        if drag_model_type==DENSITY_MODEL_FREE; A_drag_p[1,7]=1.0; A_drag_p[3,7]=(1.0-ec_val);
+        elseif drag_model_type==DENSITY_MODEL_SPECIFIC; println("警告: DENSITY_MODEL_SPECIFIC のプラント行列は未実装です。") end
     end
-    
     return SMatrix(A_kep_p), SMatrix(A_j2_p), SMatrix(A_drag_p)
 end
 
-function get_STM_prime_qns_augmented_koenig_model_selectable(
-    A_kep_prime::SMatrix{7,7,Float64},
-    A_j2_prime::SMatrix{7,7,Float64},
-    A_drag_prime::SMatrix{7,7,Float64},
-    t_prop::Float64,
-    include_drag_effects::Bool,
-    drag_model_type::DragModelTypeForSTM
-)::SMatrix{7,7,Float64}
-    
-    A_kep_J2_prime = A_kep_prime + A_j2_prime # ケプラーとJ2のプラント行列を結合
-
+function get_STM_prime_qns_augmented_koenig_model_selectable(A_kep_prime::SMatrix{7,7,Float64}, A_j2_prime::SMatrix{7,7,Float64}, A_drag_prime::SMatrix{7,7,Float64}, t_prop::Float64, ec_val_for_drag_effect::Float64, include_drag_effects::Bool, drag_model_type::DragModelTypeForSTM)::SMatrix{7,7,Float64}
+    A_kep_J2_prime=A_kep_prime+A_j2_prime
     if drag_model_type == DENSITY_MODEL_FREE && include_drag_effects
+        # Part A: 抗力のみの一次効果
         Phi_drag_prime = SMatrix{7,7,Float64}(I) + A_drag_prime * t_prop
-        Integral_Phi_drag_prime = SMatrix{7,7,Float64}(I) * t_prop + A_drag_prime * (t_prop^2 / 2.0)
-        return Phi_drag_prime + A_kep_J2_prime * Integral_Phi_drag_prime
-    elseif drag_model_type == DENSITY_MODEL_SPECIFIC && include_drag_effects
-        println("警告: DENSITY_MODEL_SPECIFIC のSTM計算は未実装です。")
-        return SMatrix{7,7,Float64}(I) + (A_kep_J2_prime + A_drag_prime) * t_prop # 仮
-    else # NO_DRAG
-        return SMatrix{7,7,Float64}(I) + A_kep_J2_prime * t_prop
-    end
+        
+        # ★★★ デバッグのため、結合項(Part B:J2摂動と差動抗力の相乗効果部)を一時的に無効化 ★★★
+        # Part B: 結合効果
+        # Integral_Phi_drag_prime = SMatrix{7,7,Float64}(I) * t_prop + A_drag_prime * (t_prop^2 / 2.0)
+        # CouplingTerm_B = A_kep_J2_prime * Integral_Phi_drag_prime
+        
+        # return Phi_drag_prime + CouplingTerm_B
+        return Phi_drag_prime # Part A のみで結果を返す
+    elseif drag_model_type==DENSITY_MODEL_SPECIFIC&&include_drag_effects; println("警告: DENSITY_MODEL_SPECIFIC のSTM計算は未実装です。"); return SMatrix{7,7,Float64}(I)+(A_kep_J2_prime+A_drag_prime)*t_prop
+    else; return SMatrix{7,7,Float64}(I)+A_kep_J2_prime*t_prop; end
 end
 
 # --- 外れ値を除去するヘルパー関数 ---
@@ -293,7 +216,7 @@ function filter_outliers_iqr(data_vector::Vector{Float64})
     return map(x -> (isfinite(x) && (x < lower_bound || x > upper_bound)) ? NaN : x, data_vector)
 end
 
-# --- ★★★ 状態再構成プロセスを検証するためのテスト関数 ★★★ ---
+# --- ★★★ 状態再構成プロセスを検証するためのテスト関数 (SatelliteToolbox.jl対応版) ★★★
 function run_state_reconstruction_test()
     println("\n\n--- 最終ROEからの状態再構成プロセスの検証を開始します ---")
 
@@ -306,38 +229,35 @@ function run_state_reconstruction_test()
         deg2rad(50.0), # i
         deg2rad(10.0), # RAAN
         deg2rad(20.0), # omega
-        deg2rad(30.0), # f_true
-        sqrt(mu_earth / (7000e3)^3), # n
-        0.0 # M (f_trueから別途計算)
+        0.0, # f_true (Mから計算するのでダミー)
+        0.0, # n (aから計算するのでダミー)
+        deg2rad(30.0)  # M
     )
-    # Mをf_trueから計算
-    E_anom_c = 2.0 * atan(sqrt((1.0-oe_chief_initial.e)/(1.0+oe_chief_initial.e)) * tan(oe_chief_initial.f_true/2.0))
-    M_c = E_anom_c - oe_chief_initial.e * sin(E_anom_c)
-    oe_chief_initial = OrbitalElementsClassical(oe_chief_initial.a, oe_chief_initial.e, oe_chief_initial.i, oe_chief_initial.RAAN, oe_chief_initial.omega, oe_chief_initial.f_true, oe_chief_initial.n, M_c)
     
-    posvel_chief_initial_eci = elements_to_cartesian_matlab_style(oe_chief_initial.a, oe_chief_initial.e, oe_chief_initial.i, oe_chief_initial.RAAN, oe_chief_initial.omega, oe_chief_initial.f_true, mu_earth)
+    # 主衛星のECI状態を計算
+    posvel_chief_initial_eci = orbital_elements_to_sv(oe_chief_initial)
     r_chief_initial_eci = SVector{3}(posvel_chief_initial_eci[1:3])
     v_chief_initial_eci = SVector{3}(posvel_chief_initial_eci[4:6])
-
+    # ECIから再度OEを計算し、一貫性を保つ
+    oe_chief_initial = sv_to_orbital_elements(CartesianStateECI(r_chief_initial_eci, v_chief_initial_eci))
+    
     # 副衛星の初期状態 (主衛星に対して意図的にずれを持たせる)
-    # 例: 軌道長半径をわずかに大きく、離心率ベクトルのx成分をずらす
     oe_deputy_initial_true = OrbitalElementsClassical(
         oe_chief_initial.a + 10.0, # a_d = a_c + 10m
         oe_chief_initial.e + 0.0001, # e_d
         oe_chief_initial.i + deg2rad(0.01), # i_d
         oe_chief_initial.RAAN + deg2rad(0.01), # RAAN_d
         oe_chief_initial.omega + deg2rad(0.02), # omega_d
-        oe_chief_initial.f_true + deg2rad(0.03), # f_true_d
-        0.0, 0.0 # n, M は後で計算
+        0.0, 0.0, # f, n (ダミー)
+        oe_chief_initial.M + deg2rad(0.03)  # M_d
     )
-    E_anom_d = 2.0 * atan(sqrt((1.0-oe_deputy_initial_true.e)/(1.0+oe_deputy_initial_true.e)) * tan(oe_deputy_initial_true.f_true/2.0))
-    M_d = E_anom_d - oe_deputy_initial_true.e * sin(E_anom_d)
-    n_d = sqrt(mu_earth / oe_deputy_initial_true.a^3)
-    oe_deputy_initial_true = OrbitalElementsClassical(oe_deputy_initial_true.a, oe_deputy_initial_true.e, oe_deputy_initial_true.i, oe_deputy_initial_true.RAAN, oe_deputy_initial_true.omega, oe_deputy_initial_true.f_true, n_d, M_d)
     
-    posvel_deputy_initial_eci_true = elements_to_cartesian_matlab_style(oe_deputy_initial_true.a, oe_deputy_initial_true.e, oe_deputy_initial_true.i, oe_deputy_initial_true.RAAN, oe_deputy_initial_true.omega, oe_deputy_initial_true.f_true, mu_earth)
+    posvel_deputy_initial_eci_true = orbital_elements_to_sv(oe_deputy_initial_true)
     r_deputy_initial_eci_true = SVector{3}(posvel_deputy_initial_eci_true[1:3])
     v_deputy_initial_eci_true = SVector{3}(posvel_deputy_initial_eci_true[4:6])
+    # こちらもECIから再計算
+    oe_deputy_initial_true = sv_to_orbital_elements(CartesianStateECI(r_deputy_initial_eci_true, v_deputy_initial_eci_true))
+
 
     println("--- 1. 検証用の「真の」状態を設定 ---")
     println("主衛星の真のECI位置: ", r_chief_initial_eci)
@@ -362,10 +282,7 @@ function run_state_reconstruction_test()
     println("\n--- 3. 逆変換 (ROE -> ECI) を実行 ---")
     # 逆変換関数に「真の」ROEと主衛星のOEを入力
     oe_deputy_reconstructed = final_roe_to_deputy_oe(oe_chief_initial, true_roes_augmented)
-    posvel_deputy_reconstructed_eci = elements_to_cartesian_matlab_style(
-        oe_deputy_reconstructed.a, oe_deputy_reconstructed.e, oe_deputy_reconstructed.i, oe_deputy_reconstructed.RAAN,
-        oe_deputy_reconstructed.omega, oe_deputy_reconstructed.f_true, mu_earth
-    )
+    posvel_deputy_reconstructed_eci = orbital_elements_to_sv(oe_deputy_reconstructed)
     r_deputy_reconstructed_eci = SVector{3}(posvel_deputy_reconstructed_eci[1:3])
     v_deputy_reconstructed_eci = SVector{3}(posvel_deputy_reconstructed_eci[4:6])
     
@@ -389,6 +306,247 @@ function run_state_reconstruction_test()
         println("位置誤差ベクトル: ", position_error_vec)
         println("速度誤差ベクトル: ", velocity_error_vec)
     end
+end
+
+# --- ★★★ STMの伝播プロセスを検証するためのデバッグ関数 (10軌道周期版) ★★★ ---
+function debug_stm_propagation_long_term()
+    println("\n\n--- STMの長期伝播(10軌道)デバッグを開始します ---")
+
+    # --- 1. 単純な初期条件を設定 ---
+    println("\n--- 1. 単純な初期条件を設定 ---")
+    
+    # 主衛星: 赤道上の真円軌道 (a=7000km, e=0, i=0)
+    # ※ 数値計算上、eとiは完全な0を避ける
+    oe_c_debug_initial_struct = OrbitalElementsClassical(7000e3, 1e-9, 1e-9, 0.0, 0.0, 0.0, 0.0, 0.0)
+    
+    posvel_c_eci_vec = orbital_elements_to_sv(oe_c_debug_initial_struct)
+    r_c_eci = SVector{3}(posvel_c_eci_vec[1:3])
+    v_c_eci = SVector{3}(posvel_c_eci_vec[4:6])
+    oe_c_debug = sv_to_orbital_elements(CartesianStateECI(r_c_eci, v_c_eci))
+
+    # 副衛星: T方向に0.1m/sで分離 (初期δaが最大になるケース)
+    dv_lvlh_debug = SVector(0.0, 0.1, 0.0)
+    dr_lvlh_debug = SVector(0.0, 0.0, 0.0)
+    state_d_eci = cw_to_eci_deputy_state(r_c_eci, v_c_eci, dr_lvlh_debug, dv_lvlh_debug)
+    oe_d_debug = sv_to_orbital_elements(state_d_eci)
+    
+    # 初期ROEを計算
+    roe_initial_debug = orbital_elements_to_qns_roe_koenig(oe_c_debug, oe_d_debug)
+    roe_aug_init_debug = SVector(
+        roe_initial_debug.delta_a_norm, roe_initial_debug.delta_lambda, roe_initial_debug.delta_ex,
+        roe_initial_debug.delta_ey, roe_initial_debug.delta_ix, roe_initial_debug.delta_iy, 0.0
+    )
+
+    println("主衛星初期OE: a=$(oe_c_debug.a), e=$(oe_c_debug.e), i=$(rad2deg(oe_c_debug.i))")
+    println("副衛星初期OE: a=$(oe_d_debug.a), e=$(oe_d_debug.e), i=$(rad2deg(oe_d_debug.i))")
+    @printf "初期ROE: δa_norm: %.3e\n" roe_aug_init_debug[1]
+
+    # --- 2. 10軌道周期後の状態を2つの方法で計算 ---
+    println("\n--- 2. 10軌道周期後の状態を計算 (STM vs 数値プロパゲータ) ---")
+    
+    # 伝播時間 = 10軌道周期
+    t_prop_debug = 10.0 * 2.0 * pi / oe_c_debug.n
+    println("伝播時間: $t_prop_debug 秒 (10軌道周期)")
+
+    # (A) STMによる伝播 (J2摂動のみを考慮)
+    include_j2 = true; include_drag = false; drag_model = NO_DRAG
+    A_kep_p, A_j2_p, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(
+        oe_c_debug.a, oe_c_debug.e, oe_c_debug.i, oe_c_debug.omega,
+        include_j2, include_drag, drag_model
+    )
+    STM_prime_debug = get_STM_prime_qns_augmented_koenig_model_selectable(
+        A_kep_p, A_j2_p, A_drag_p, t_prop_debug, oe_c_debug.e, include_drag, drag_model
+    )
+    roe_final_stm = STM_prime_debug * roe_aug_init_debug
+
+    # (B) SatelliteToolboxのプロパゲータによる伝播 (比較用の「真値」)
+    keps_c = KeplerianElements(0.0, oe_c_debug.a, oe_c_debug.e, oe_c_debug.i, oe_c_debug.RAAN, oe_c_debug.omega, oe_c_debug.f_true)
+    keps_d = KeplerianElements(0.0, oe_d_debug.a, oe_d_debug.e, oe_d_debug.i, oe_d_debug.RAAN, oe_d_debug.omega, oe_d_debug.f_true)
+    
+    j2_prop_c = Propagators.init(Val(:J2), keps_c)
+    j2_prop_d = Propagators.init(Val(:J2), keps_d)
+
+    rf_c, vf_c = Propagators.propagate!(j2_prop_c, t_prop_debug)
+    rf_d, vf_d = Propagators.propagate!(j2_prop_d, t_prop_debug)
+
+    oe_c_final_propagator = sv_to_orbital_elements(CartesianStateECI(rf_c, vf_c))
+    oe_d_final_propagator = sv_to_orbital_elements(CartesianStateECI(rf_d, vf_d))
+
+    # --- 3. 最終分離距離の比較 ---
+    final_separation_stm = norm(orbital_elements_to_sv(final_roe_to_deputy_oe(oe_c_final_propagator, roe_final_stm))[1:3] - rf_c)
+    final_separation_propagator = norm(rf_d - rf_c)
+
+    @printf "\n最終分離距離 (STM予測): %.2f km\n" (final_separation_stm / 1000.0)
+    @printf "最終分離距離 (プロパゲータ): %.2f km\n" (final_separation_propagator / 1000.0)
+
+    if final_separation_propagator > 0 && abs(final_separation_stm - final_separation_propagator) / final_separation_propagator < 0.1 # 10%以内ならOK
+        println("\n検証結果: STMの予測は、10軌道周期後でも数値プロパゲータの結果と概ね一致しています。")
+    else
+        println("\n警告: STMの予測が数値プロパゲータの結果と大きく乖離しています。STMの線形モデルが長時間伝播で発散している可能性があります。")
+    end
+end
+
+# --- ★★★ STMの伝播プロセスを検証するためのデバッグ関数 (10軌道周期版) ★★★ ---
+# ★★★ 軌道傾斜角の影響を検証するためのデバッグ関数 ★★★
+function debug_with_inclination()
+    println("\n\n--- 軌道傾斜角の影響検証デバッグを開始します ---")
+
+    # --- 1. 初期条件を設定 (i のみ main_simulation の値を使用) ---
+    println("\n--- 1. 初期条件を設定 (i = 97.65 deg) ---")
+    
+    # ★★★ 修正: 引数を8つに合わせる (f_trueとnにダミー値0.0を追加) ★★★
+    oe_c_debug_initial_struct = OrbitalElementsClassical(
+        7000e3,           # a
+        0.0022,             # e (円軌道のまま)
+        deg2rad(97.65),   # ★ i を変更
+        0.0,              # RAAN
+        0.0,              # omega
+        0.0,              # f_true (Mから計算するのでダミー)
+        0.0,              # n (aから計算するのでダミー)
+        0.0               # M
+    )
+    
+    posvel_c_eci_vec = orbital_elements_to_sv(oe_c_debug_initial_struct)
+    r_c_eci = SVector{3}(posvel_c_eci_vec[1:3])
+    v_c_eci = SVector{3}(posvel_c_eci_vec[4:6])
+    oe_c_debug = sv_to_orbital_elements(CartesianStateECI(r_c_eci, v_c_eci))
+
+    # 副衛星: T方向に0.1m/sで分離
+    dv_lvlh_debug = SVector(0.0, 0.1, 0.0)
+    dr_lvlh_debug = SVector(0.0, 0.0, 0.0)
+    state_d_eci = cw_to_eci_deputy_state(r_c_eci, v_c_eci, dr_lvlh_debug, dv_lvlh_debug)
+    oe_d_debug = sv_to_orbital_elements(state_d_eci)
+    
+    # 初期ROEを計算
+    roe_initial_debug = orbital_elements_to_qns_roe_koenig(oe_c_debug, oe_d_debug)
+    roe_aug_init_debug = SVector(
+        roe_initial_debug.delta_a_norm, roe_initial_debug.delta_lambda, roe_initial_debug.delta_ex,
+        roe_initial_debug.delta_ey, roe_initial_debug.delta_ix, roe_initial_debug.delta_iy, 0.0
+    )
+
+    println("主衛星初期OE: a=$(oe_c_debug.a), e=$(oe_c_debug.e), i=$(rad2deg(oe_c_debug.i))")
+    @printf "初期ROE: δa_norm: %.3e\n" roe_aug_init_debug[1]
+
+    # --- 2. 10軌道周期後の状態を計算 ---
+    println("\n--- 2. 10軌道周期後の状態を計算 (J2_ONLY STM) ---")
+    
+    t_prop_debug = 10.0 * 2.0 * pi / oe_c_debug.n
+    println("伝播時間: $t_prop_debug 秒 (10軌道周期)")
+
+    # (A) STMによる伝播
+    include_j2 = true; include_drag = false; drag_model = NO_DRAG
+    A_kep_p, A_j2_p, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(
+        oe_c_debug.a, oe_c_debug.e, oe_c_debug.i, oe_c_debug.omega,
+        include_j2, include_drag, drag_model
+    )
+    
+    # ★★★ J変換を追加（i, ωが0でなくなったため） ★★★
+    omega_c_ti = oe_c_debug.omega
+    omega_dot_j2, Omega_dot_j2 = get_secular_j2_rates_koenig(oe_c_debug.a, oe_c_debug.e, oe_c_debug.i)
+    omega_c_tf = oe_c_debug.omega + omega_dot_j2 * t_prop_debug
+    
+    J_ti = get_J_qns_augmented_koenig(omega_c_ti)
+    J_tf_inv = get_J_qns_inv_augmented_koenig(omega_c_tf)
+    roe_prime_init = J_ti * roe_aug_init_debug
+
+    STM_prime_debug = get_STM_prime_qns_augmented_koenig_model_selectable(
+        A_kep_p, A_j2_p, A_drag_p, t_prop_debug, oe_c_debug.e, include_drag, drag_model
+    )
+    roe_prime_final = STM_prime_debug * roe_prime_init
+    roe_final_stm = J_tf_inv * roe_prime_final
+
+
+    # --- 3. 最終分離距離の計算 ---
+    # 比較のため、数値プロパゲータの結果も計算
+    keps_c = KeplerianElements(0.0, oe_c_debug.a, oe_c_debug.e, oe_c_debug.i, oe_c_debug.RAAN, oe_c_debug.omega, oe_c_debug.f_true)
+    j2_prop_c = Propagators.init(Val(:J2), keps_c)
+    rf_c, vf_c = Propagators.propagate!(j2_prop_c, t_prop_debug)
+    oe_c_final_propagator = sv_to_orbital_elements(CartesianStateECI(rf_c, vf_c))
+
+    oe_deputy_final_stm = final_roe_to_deputy_oe(oe_c_final_propagator, roe_final_stm)
+    posvel_deputy_final_stm = orbital_elements_to_sv(oe_deputy_final_stm)
+    r_deputy_final_stm = SVector{3}(posvel_deputy_final_stm[1:3])
+    
+    final_separation_stm = norm(r_deputy_final_stm - rf_c)
+    
+    @printf "\n軌道傾斜角 i=%.2f deg の場合:\n" rad2deg(oe_c_debug.i)
+    @printf "  最終分離距離 (STM予測): %.2f km\n" (final_separation_stm / 1000.0)
+end
+
+# ★★★ STMの内部計算を検証するためのデバッグ関数 ★★★
+function debug_stm_components()
+    println("\n\n--- STM結合ロジックのデバッグを開始します ---")
+
+    # --- 1. main_simulation と同じ現実的な初期条件を設定 ---
+    println("\n--- 1. main_simulation と同じ初期条件を設定 ---")
+    oe_chief_initial_for_sv = OrbitalElementsClassical(a_c_stm_init, e_c_stm_init, i_c_stm_init, Omega_c_stm_init, omega_c_stm_init, 0.0, 0.0, M_c_stm_init)
+    posvel_chief_initial_eci_vec = orbital_elements_to_sv(oe_chief_initial_for_sv)
+    r_chief_init_eci=SVector{3}(posvel_chief_initial_eci_vec[1:3])
+    v_chief_init_eci=SVector{3}(posvel_chief_initial_eci_vec[4:6])
+    oe_chief_eval = sv_to_orbital_elements(CartesianStateECI(r_chief_init_eci, v_chief_init_eci))
+
+    # 90°分離に固定
+    angle_rad_val = deg2rad(90.0)
+    dv_R_val_comp=delta_v_magnitude*cos(angle_rad_val); dv_T_val_comp=delta_v_magnitude*sin(angle_rad_val);
+    dv_lvlh_vec=SVector(dv_R_val_comp,dv_T_val_comp,0.0); dr_lvlh_vec=SVector(10.0,0.0,0.0)
+    state_deputy_init_eci=cw_to_eci_deputy_state(r_chief_init_eci,v_chief_init_eci,dr_lvlh_vec,dv_lvlh_vec)
+    r_dep_init_eci=state_deputy_init_eci.r_vec; v_dep_init_eci=state_deputy_init_eci.v_vec
+    oe_dep_init=sv_to_orbital_elements(CartesianStateECI(r_dep_init_eci,v_dep_init_eci))
+    qns_roes_init=orbital_elements_to_qns_roe_koenig(oe_chief_eval,oe_dep_init)
+    
+    aug_param_val=delta_a_dot_drag_initial_normalized
+    roe_aug_init_vec_temp=MVector{7,Float64}(qns_roes_init.delta_a_norm,qns_roes_init.delta_lambda,qns_roes_init.delta_ex,qns_roes_init.delta_ey,qns_roes_init.delta_ix,qns_roes_init.delta_iy,aug_param_val)
+    roe_aug_init_vec=SVector(roe_aug_init_vec_temp)
+    
+    # 伝播時間 = 10軌道周期
+    t_prop = 10.0 * 2.0 * pi * sqrt(oe_chief_eval.a^3 / mu_earth)
+    println("伝播時間: $t_prop 秒 (10軌道周期)")
+
+    # --- 2. プラント行列の各成分を計算・表示 ---
+    println("\n--- 2. プラント行列の各成分を計算・表示 ---")
+    A_kep_p, A_j2_p, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(
+        oe_chief_eval.a, oe_chief_eval.e, oe_chief_eval.i, oe_chief_eval.omega, 
+        true, true, DENSITY_MODEL_FREE
+    )
+    A_kep_J2_prime = A_kep_p + A_j2_p
+
+    println("A_kep_p (ケプラー項) のノルム: ", norm(A_kep_p))
+    println("A_j2_p (J2項) のノルム: ", norm(A_j2_p))
+    println("A_drag_p (抗力項) のノルム: ", norm(A_drag_p))
+    
+    # --- 3. STMの各構成要素を計算・表示 ---
+    println("\n--- 3. STMの各構成要素を計算・表示 ---")
+    
+    # Part A: 抗力のみの効果
+    Phi_drag_prime = SMatrix{7,7,Float64}(I) + A_drag_p * t_prop
+    
+    # Part B: 結合効果
+    Integral_Phi_drag_prime = SMatrix{7,7,Float64}(I) * t_prop + A_drag_p * (t_prop^2 / 2.0)
+    CouplingTerm_B = A_kep_J2_prime * Integral_Phi_drag_prime
+    
+    # 最終STM
+    STM_prime = Phi_drag_prime + CouplingTerm_B
+
+    println("Φ_drag' (Part A) のノルム: ", norm(Phi_drag_prime))
+    println("∫Φ_drag' dt のノルム: ", norm(Integral_Phi_drag_prime))
+    println("A_kep_j2' * ∫Φ_drag' dt (Part B) のノルム: ", norm(CouplingTerm_B))
+    println("最終的なSTM' のノルム: ", norm(STM_prime))
+
+    # --- 4. 最終的な分離距離を計算 ---
+    println("\n--- 4. 最終的な分離距離を計算 ---")
+    omega_c_ti=oe_chief_eval.omega; omega_dot_j2,Omega_dot_j2=get_secular_j2_rates_koenig(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i)
+    oe_chief_at_tf=OrbitalElementsClassical(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i,mod(oe_chief_eval.RAAN+Omega_dot_j2*t_prop,2*pi),mod(oe_chief_eval.omega+omega_dot_j2*t_prop,2*pi),0.0,oe_chief_eval.n,mod(oe_chief_eval.M+oe_chief_eval.n*t_prop,2*pi))
+    oe_chief_at_tf=OrbitalElementsClassical(oe_chief_at_tf.a,oe_chief_at_tf.e,oe_chief_at_tf.i,oe_chief_at_tf.RAAN,oe_chief_at_tf.omega,SatelliteToolbox.mean_to_true_anomaly(oe_chief_at_tf.e,oe_chief_at_tf.M),oe_chief_at_tf.n,oe_chief_at_tf.M)
+    omega_c_tf_val=oe_chief_at_tf.omega; J_ti=get_J_qns_augmented_koenig(omega_c_ti); J_tf_inv=get_J_qns_inv_augmented_koenig(omega_c_tf_val); roe_prime_init=J_ti*roe_aug_init_vec
+    
+    roe_prime_final=STM_prime*roe_prime_init; roe_aug_final_vec=J_tf_inv*roe_prime_final
+
+    posvel_chief_final_eci=orbital_elements_to_sv(oe_chief_at_tf); r_chief_eci_final_val=SVector{3}(posvel_chief_final_eci[1:3]); 
+    oe_deputy_at_tf=final_roe_to_deputy_oe(oe_chief_at_tf,roe_aug_final_vec)
+    posvel_deputy_final_eci=orbital_elements_to_sv(oe_deputy_at_tf); r_deputy_eci_final_val=SVector{3}(posvel_deputy_final_eci[1:3])
+    
+    final_separation_distance = norm(r_deputy_eci_final_val - r_chief_eci_final_val)
+    @printf "最終分離距離: %.2f km\n" (final_separation_distance / 1000.0)
 end
 
 # --- プロットとHTMLレポート作成関数 ---
@@ -515,11 +673,10 @@ function main_simulation(
     include_j2_active=(perturbation_setting == J2_ONLY || perturbation_setting == J2_AND_DRAG)
     include_drag_active_stm=(drag_model_setting != NO_DRAG && (perturbation_setting == DRAG_ONLY || perturbation_setting == J2_AND_DRAG) )
 
-    f_true_c_init_calc=M_c_stm_init
-    if abs(e_c_stm_init)>1e-9; E_approx_calc=M_c_stm_init+e_c_stm_init*sin(M_c_stm_init); if abs(1.0-e_c_stm_init)>1e-9; tan_E_half_calc=tan(E_approx_calc/2.0); if abs(1.0-e_c_stm_init)<1e-9; f_true_c_init_calc=E_approx_calc; else; sqrt_term_calc=sqrt(abs((1.0+e_c_stm_init)/(1.0-e_c_stm_init))); f_true_c_init_calc=2.0*atan(sqrt_term_calc*tan_E_half_calc); end; else; f_true_c_init_calc=E_approx_calc; end; f_true_c_init_calc=mod(f_true_c_init_calc,2*pi); if f_true_c_init_calc<0; f_true_c_init_calc+=2*pi; end; end
-    posvel_chief_initial_eci_vec = elements_to_cartesian_matlab_style(a_c_stm_init,e_c_stm_init,i_c_stm_init,Omega_c_stm_init,omega_c_stm_init,f_true_c_init_calc,mu_earth)
+    oe_chief_initial_for_sv = OrbitalElementsClassical(a_c_stm_init, e_c_stm_init, i_c_stm_init, Omega_c_stm_init, omega_c_stm_init, 0.0, 0.0, M_c_stm_init)
+    posvel_chief_initial_eci_vec = orbital_elements_to_sv(oe_chief_initial_for_sv)
     r_chief_init_eci=SVector{3}(posvel_chief_initial_eci_vec[1:3]); v_chief_init_eci=SVector{3}(posvel_chief_initial_eci_vec[4:6])
-    oe_chief_eval=cartesian_to_elements_matlab_style(posvel_chief_initial_eci_vec,mu_earth)
+    oe_chief_eval = sv_to_orbital_elements(CartesianStateECI(r_chief_init_eci, v_chief_init_eci))
 
     optimal_angle_deg=-1.0; min_cost=Inf; angles_plot_list=Float64[]
     roe_data_log=Dict(
@@ -531,9 +688,20 @@ function main_simulation(
     )
     println("Pert: $perturbation_setting, J2: $include_j2_active, Drag STM active: $include_drag_active_stm (Model: $drag_model_setting), Separation Plane: $separation_plane_setting")
 
-    # ★★★ 固定伝播時間の設定 (10軌道周期) ★★★
     fixed_propagation_time = 10.0 * 2.0 * pi * sqrt(oe_chief_eval.a^3 / mu_earth)
     println("Fixed propagation time set to 10 orbits: $(fixed_propagation_time) seconds")
+
+    # # ★★★ デバッグのための修正 ★★★
+    # local fixed_propagation_time
+    # if perturbation_setting == DRAG_ONLY
+    #     # DRAG_ONLYのケースだけ、1軌道周期でテスト
+    #     fixed_propagation_time = 1.0 * 2.0 * pi * sqrt(oe_chief_eval.a^3 / mu_earth)
+    #     println("DEBUG: Propagation time for DRAG_ONLY set to 1 orbit: $(fixed_propagation_time) seconds")
+    # else
+    #     # 他のケースでは10軌道周期
+    #     fixed_propagation_time = 10.0 * 2.0 * pi * sqrt(oe_chief_eval.a^3 / mu_earth)
+    # end
+    # # ★★★ ここまで ★★★
 
     angle_step_val=10.0
     for angle_val in 0.0:angle_step_val:(360.0-angle_step_val)
@@ -542,7 +710,7 @@ function main_simulation(
         if separation_plane_setting==RT_PLANE; dv_R_val_comp=delta_v_magnitude*cos(angle_rad_val); dv_T_val_comp=delta_v_magnitude*sin(angle_rad_val);
         elseif separation_plane_setting==RN_PLANE; dv_R_val_comp=delta_v_magnitude*cos(angle_rad_val); dv_N_val_comp=delta_v_magnitude*sin(angle_rad_val);
         elseif separation_plane_setting==NT_PLANE; dv_T_val_comp=delta_v_magnitude*cos(angle_rad_val); dv_N_val_comp=delta_v_magnitude*sin(angle_rad_val); end
-        dv_lvlh_vec=SVector(dv_R_val_comp,dv_T_val_comp,dv_N_val_comp); dr_lvlh_vec=SVector(10.0,0.0,0.0) # 初期相対位置
+        dv_lvlh_vec=SVector(dv_R_val_comp,dv_T_val_comp,dv_N_val_comp); dr_lvlh_vec=SVector(10.0,0.0,0.0)
         state_deputy_init_eci=cw_to_eci_deputy_state(r_chief_init_eci,v_chief_init_eci,dr_lvlh_vec,dv_lvlh_vec)
         r_dep_init_eci=state_deputy_init_eci.r_vec; v_dep_init_eci=state_deputy_init_eci.v_vec
         aj2_chief_init=calculate_j2_perturbation_eci(r_chief_init_eci,mu_earth,J2_coeff,R_E)
@@ -550,8 +718,7 @@ function main_simulation(
         aj2_rel_init_eci=aj2_dep_init-aj2_chief_init
         aj2_rel_init_hill=eci_to_hill_relative_acceleration(aj2_rel_init_eci,r_chief_init_eci,v_chief_init_eci)
         push!(roe_data_log[:initial_rel_j2_r],aj2_rel_init_hill[1]); push!(roe_data_log[:initial_rel_j2_t],aj2_rel_init_hill[2]); push!(roe_data_log[:initial_rel_j2_n],aj2_rel_init_hill[3]); push!(roe_data_log[:initial_rel_j2_norm],norm(aj2_rel_init_eci))
-        posvel_dep_init_vec=vcat(r_dep_init_eci,v_dep_init_eci)
-        oe_dep_init=cartesian_to_elements_matlab_style(posvel_dep_init_vec,mu_earth)
+        oe_dep_init=sv_to_orbital_elements(CartesianStateECI(r_dep_init_eci,v_dep_init_eci))
         qns_roes_init=orbital_elements_to_qns_roe_koenig(oe_chief_eval,oe_dep_init)
         push!(roe_data_log[:initial_delta_a],qns_roes_init.delta_a_norm); push!(roe_data_log[:initial_delta_lambda],rad2deg(qns_roes_init.delta_lambda)); push!(roe_data_log[:initial_delta_ex],qns_roes_init.delta_ex); push!(roe_data_log[:initial_delta_ey],qns_roes_init.delta_ey); push!(roe_data_log[:initial_delta_ix],rad2deg(qns_roes_init.delta_ix)); push!(roe_data_log[:initial_delta_iy],rad2deg(qns_roes_init.delta_iy))
         aug_param_val=0.0
@@ -560,45 +727,56 @@ function main_simulation(
         if !include_drag_active_stm; roe_aug_init_vec_temp[7]=0.0; end
         roe_aug_init_vec=SVector(roe_aug_init_vec_temp)
         
-        # ★★★ 伝播時間を全てのケースで固定値に設定 ★★★
-        tf_val = fixed_propagation_time
+        tf_val=fixed_propagation_time
         push!(angles_plot_list,angle_val)
         push!(roe_data_log[:t_final],tf_val)
         
         omega_c_ti=oe_chief_eval.omega; omega_dot_j2,Omega_dot_j2=include_j2_active ? get_secular_j2_rates_koenig(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i) : (0.0,0.0)
         oe_chief_at_tf=OrbitalElementsClassical(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i,mod(oe_chief_eval.RAAN+Omega_dot_j2*tf_val,2*pi),mod(oe_chief_eval.omega+omega_dot_j2*tf_val,2*pi),0.0,oe_chief_eval.n,mod(oe_chief_eval.M+oe_chief_eval.n*tf_val,2*pi))
-        f_true_chief_tf_calc=oe_chief_at_tf.M; if abs(oe_chief_at_tf.e)>1e-9; E_approx_tf_calc=oe_chief_at_tf.M+oe_chief_at_tf.e*sin(oe_chief_at_tf.M); if abs(1.0-oe_chief_at_tf.e)>1e-9; tan_E_half_tf_calc=tan(E_approx_tf_calc/2.0); if abs(1.0-oe_chief_at_tf.e)<1e-9; f_true_chief_tf_calc=E_approx_tf_calc; else; sqrt_term_tf_calc=sqrt(abs((1.0+oe_chief_at_tf.e)/(1.0-oe_chief_at_tf.e))); f_true_chief_tf_calc=2.0*atan(sqrt_term_tf_calc*tan_E_half_tf_calc); end; else; f_true_chief_tf_calc=E_approx_tf_calc; end; f_true_chief_tf_calc=mod(f_true_chief_tf_calc,2*pi); if f_true_chief_tf_calc<0; f_true_chief_tf_calc+=2*pi; end; end
-        oe_chief_at_tf=OrbitalElementsClassical(oe_chief_at_tf.a,oe_chief_at_tf.e,oe_chief_at_tf.i,oe_chief_at_tf.RAAN,oe_chief_at_tf.omega,f_true_chief_tf_calc,oe_chief_at_tf.n,oe_chief_at_tf.M)
+        oe_chief_at_tf=OrbitalElementsClassical(oe_chief_at_tf.a,oe_chief_at_tf.e,oe_chief_at_tf.i,oe_chief_at_tf.RAAN,oe_chief_at_tf.omega,SatelliteToolbox.mean_to_true_anomaly(oe_chief_at_tf.e,oe_chief_at_tf.M),oe_chief_at_tf.n,oe_chief_at_tf.M)
+        
         omega_c_tf_val=oe_chief_at_tf.omega; J_ti=get_J_qns_augmented_koenig(omega_c_ti); J_tf_inv=get_J_qns_inv_augmented_koenig(omega_c_tf_val); roe_prime_init=J_ti*roe_aug_init_vec
         
-        # ★★★ 修正箇所: 不要な引数 delta_B_initial_param を削除 ★★★
+        # --- ★★★ ここからが修正箇所 ★★★ ---
+        
+        # 1. プラント行列の各成分を個別に取得する
         A_kep_p, A_j2_p, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(
             oe_chief_eval.a, oe_chief_eval.e, oe_chief_eval.i, omega_c_ti, 
             include_j2_active, include_drag_active_stm, drag_model_setting
         )
         
+        # 2. 分離されたプラント行列をSTM計算関数に渡す
         STM_prime = get_STM_prime_qns_augmented_koenig_model_selectable(
             A_kep_p, A_j2_p, A_drag_p, 
             tf_val, 
-            include_drag_active_stm, drag_model_setting
+            oe_chief_eval.e, # この引数も渡す必要がある
+            include_drag_active_stm, 
+            drag_model_setting
         )
-
+        # --- ★★★ ここまでが修正箇所 ★★★ ---
+        
         roe_prime_final=STM_prime*roe_prime_init; roe_aug_final_vec=J_tf_inv*roe_prime_final
+        
         push!(roe_data_log[:final_delta_a],roe_aug_final_vec[1]); push!(roe_data_log[:final_delta_lambda],rad2deg(roe_aug_final_vec[2])); push!(roe_data_log[:final_delta_ex],roe_aug_final_vec[3]); push!(roe_data_log[:final_delta_ey],roe_aug_final_vec[4]); push!(roe_data_log[:final_delta_ix],rad2deg(roe_aug_final_vec[5])); push!(roe_data_log[:final_delta_iy],rad2deg(roe_aug_final_vec[6]))
         
-        # ★★★ 新しいコスト関数の定義 ★★★
-        cost_da_penalty=1000.0*roe_aug_final_vec[1]^2 # 10軌道周期後に残っているδaへのペナルティ
-        cost_others=norm(view(roe_aug_final_vec,2:6)); 
+        cost_da_penalty=1000.0*roe_aug_final_vec[1]^2; cost_others=norm(view(roe_aug_final_vec,2:6)); 
         total_cost=cost_da_penalty+cost_others; push!(roe_data_log[:cost],total_cost)
-
-        posvel_chief_final_eci=elements_to_cartesian_matlab_style(oe_chief_at_tf.a,oe_chief_at_tf.e,oe_chief_at_tf.i,oe_chief_at_tf.RAAN,oe_chief_at_tf.omega,oe_chief_at_tf.f_true,mu_earth)
+        
+        posvel_chief_final_eci=orbital_elements_to_sv(oe_chief_at_tf)
         r_chief_eci_final_val=SVector{3}(posvel_chief_final_eci[1:3]); v_chief_eci_final_val=SVector{3}(posvel_chief_final_eci[4:6])
-        oe_deputy_at_tf=final_roe_to_deputy_oe(oe_chief_eval,roe_aug_final_vec)
-        posvel_deputy_final_eci=elements_to_cartesian_matlab_style(oe_deputy_at_tf.a,oe_deputy_at_tf.e,oe_deputy_at_tf.i,oe_deputy_at_tf.RAAN,oe_deputy_at_tf.omega,oe_deputy_at_tf.f_true,mu_earth)
+        oe_deputy_at_tf=final_roe_to_deputy_oe(oe_chief_at_tf,roe_aug_final_vec)
+        posvel_deputy_final_eci=orbital_elements_to_sv(oe_deputy_at_tf)
         r_deputy_eci_final_val=SVector{3}(posvel_deputy_final_eci[1:3])
+        
         aj2_chief_final_eci=calculate_j2_perturbation_eci(r_chief_eci_final_val,mu_earth,J2_coeff,R_E); aj2_deputy_final_eci=calculate_j2_perturbation_eci(r_deputy_eci_final_val,mu_earth,J2_coeff,R_E)
         aj2_relative_final_eci=aj2_deputy_final_eci-aj2_chief_final_eci; aj2_relative_final_hill=eci_to_hill_relative_acceleration(aj2_relative_final_eci,r_chief_eci_final_val,v_chief_eci_final_val)
         push!(roe_data_log[:final_rel_j2_r],aj2_relative_final_hill[1]); push!(roe_data_log[:final_rel_j2_t],aj2_relative_final_hill[2]); push!(roe_data_log[:final_rel_j2_n],aj2_relative_final_hill[3]); push!(roe_data_log[:final_rel_j2_norm],norm(aj2_relative_final_eci))
+        
+        final_separation_distance = norm(r_deputy_eci_final_val - r_chief_eci_final_val)
+        if mod(angle_val, 90) == 0
+            @printf "  [Angle %.0f deg] Final Separation Distance: %.2f km\n" angle_val (final_separation_distance / 1000.0)
+        end
+
         if total_cost<min_cost&&isfinite(total_cost); min_cost=total_cost; optimal_angle_deg=angle_val; end
     end
     println("ループ終了")
@@ -618,3 +796,6 @@ end
 
 run_all_cases()
 run_state_reconstruction_test() # デバッグ用関数を実行
+debug_stm_propagation_long_term() # デバッグ関数を実行
+debug_with_inclination()
+debug_stm_components() # 新しいデバッグ関数を実行
