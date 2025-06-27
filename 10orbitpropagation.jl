@@ -107,6 +107,43 @@ function orbital_elements_to_qns_roe_koenig(oe_c::OrbitalElementsClassical, oe_d
     return QuasiNonsingularROEsKoenig(delta_a_norm_val,delta_lambda_val,delta_ex_val,delta_ey_val,delta_ix_val,delta_iy_val)
 end
 
+function eci_to_hill(r_eci::SVector{3,Float64}, v_eci::SVector{3,Float64}, r_chief_eci::SVector{3,Float64}, v_chief_eci::SVector{3,Float64})::SVector{3,Float64}
+    r_c_hat=normalize(r_chief_eci); h_c_vec=cross(r_chief_eci,v_chief_eci); h_c_hat_val=normalize(h_c_vec)
+    if norm(h_c_vec)<1e-9; t_c_hat_temp=normalize(v_chief_eci); if abs(dot(r_c_hat,t_c_hat_temp))>1.0-1e-6; temp_axis=abs(t_c_hat_temp[1])<0.9 ? SVector(1.0,0,0) : SVector(0,1.0,0); h_c_hat_val=normalize(cross(t_c_hat_temp,temp_axis)); else; h_c_hat_val=normalize(cross(r_c_hat,t_c_hat_temp)); end; end
+    t_c_hat_final=normalize(cross(h_c_hat_val,r_c_hat)); dcm_eci_to_hill=transpose(hcat(r_c_hat,t_c_hat_final,h_c_hat_val))
+    dr_eci = r_eci - r_chief_eci
+    return dcm_eci_to_hill * dr_eci
+end
+
+"""
+ECI座標系での相対位置ベクトルを、主衛星基準のHill座標系に変換する。
+"""
+function eci_to_hill_rel_pos(r_deputy_eci::SVector{3,Float64}, r_chief_eci::SVector{3,Float64}, v_chief_eci::SVector{3,Float64})::SVector{3,Float64}
+    # 主衛星基準のHill座標系の軸を計算
+    r_c_hat = normalize(r_chief_eci)
+    h_c_vec = cross(r_chief_eci, v_chief_eci)
+    h_c_hat_val = normalize(h_c_vec)
+    if norm(h_c_vec) < 1e-9
+        t_c_hat_temp = normalize(v_chief_eci)
+        if abs(dot(r_c_hat, t_c_hat_temp)) > 1.0 - 1e-6
+            temp_axis = abs(t_c_hat_temp[1]) < 0.9 ? SVector(1.0,0,0) : SVector(0,1.0,0)
+            h_c_hat_val = normalize(cross(t_c_hat_temp, temp_axis))
+        else
+            h_c_hat_val = normalize(cross(r_c_hat, t_c_hat_temp))
+        end
+    end
+    t_c_hat_final = normalize(cross(h_c_hat_val, r_c_hat))
+    
+    # ECIからHillへの回転行列を作成
+    dcm_eci_to_hill = transpose(hcat(r_c_hat, t_c_hat_final, h_c_hat_val))
+    
+    # ECI座標系での相対位置ベクトルを計算
+    dr_eci = r_deputy_eci - r_chief_eci
+    
+    # Hill座標系に変換
+    return dcm_eci_to_hill * dr_eci
+end
+
 function calculate_j2_perturbation_eci(r_eci_vec::SVector{3,Float64}, mu::Float64, j2_val::Float64, r_earth_eq::Float64)::SVector{3,Float64}
     x,y,z=r_eci_vec; r_sq=dot(r_eci_vec,r_eci_vec); r=sqrt(r_sq); if r<1e-3; return SVector(0.0,0.0,0.0); end
     term_common=-1.5*mu*j2_val*r_earth_eq^2/(r^5); z_sq_r_sq=(z^2)/r_sq
@@ -216,7 +253,7 @@ function filter_outliers_iqr(data_vector::Vector{Float64})
     return map(x -> (isfinite(x) && (x < lower_bound || x > upper_bound)) ? NaN : x, data_vector)
 end
 
-# --- ★★★ 状態再構成プロセスを検証するためのテスト関数 (SatelliteToolbox.jl対応版) ★★★
+# --- 状態再構成プロセスを検証するためのテスト関数
 function run_state_reconstruction_test()
     println("\n\n--- 最終ROEからの状態再構成プロセスの検証を開始します ---")
 
@@ -308,7 +345,7 @@ function run_state_reconstruction_test()
     end
 end
 
-# --- ★★★ STMの伝播プロセスを検証するためのデバッグ関数 (10軌道周期版) ★★★ ---
+# --- STMの伝播プロセスを検証するためのデバッグ関数 (10軌道周期版)
 function debug_stm_propagation_long_term()
     println("\n\n--- STMの長期伝播(10軌道)デバッグを開始します ---")
 
@@ -317,7 +354,7 @@ function debug_stm_propagation_long_term()
     
     # 主衛星: 赤道上の真円軌道 (a=7000km, e=0, i=0)
     # ※ 数値計算上、eとiは完全な0を避ける
-    oe_c_debug_initial_struct = OrbitalElementsClassical(7000e3, 1e-9, 1e-9, 0.0, 0.0, 0.0, 0.0, 0.0)
+    oe_c_debug_initial_struct = OrbitalElementsClassical(7000e3, 0.0022, deg2rad(97.65), 0.0, 0.0, 0.0, 0.0, 0.0)
     
     posvel_c_eci_vec = orbital_elements_to_sv(oe_c_debug_initial_struct)
     r_c_eci = SVector{3}(posvel_c_eci_vec[1:3])
@@ -386,8 +423,7 @@ function debug_stm_propagation_long_term()
     end
 end
 
-# --- ★★★ STMの伝播プロセスを検証するためのデバッグ関数 (10軌道周期版) ★★★ ---
-# ★★★ 軌道傾斜角の影響を検証するためのデバッグ関数 ★★★
+# 軌道傾斜角の影響を検証するためのデバッグ関数
 function debug_with_inclination()
     println("\n\n--- 軌道傾斜角の影響検証デバッグを開始します ---")
 
@@ -473,7 +509,7 @@ function debug_with_inclination()
     @printf "  最終分離距離 (STM予測): %.2f km\n" (final_separation_stm / 1000.0)
 end
 
-# ★★★ STMの内部計算を検証するためのデバッグ関数 ★★★
+# STMの内部計算を検証するためのデバッグ関数
 function debug_stm_components()
     println("\n\n--- STM結合ロジックのデバッグを開始します ---")
 
@@ -547,6 +583,92 @@ function debug_stm_components()
     
     final_separation_distance = norm(r_deputy_eci_final_val - r_chief_eci_final_val)
     @printf "最終分離距離: %.2f km\n" (final_separation_distance / 1000.0)
+end
+
+# --- STMとプロパゲータの比較デバッグ関数 ---
+function debug_reconstruction_with_propagator()
+    println("\n\n--- J2_ONLYケースの状態再構成デバッグを開始します ---")
+
+    # --- 1. main_simulationと同じ現実的な初期条件を設定 ---
+    println("\n--- 1. 初期条件を設定 (i=97.65deg, e=0.0022) ---")
+    
+    oe_c_initial = OrbitalElementsClassical(a_c_stm_init, e_c_stm_init, i_c_stm_init, Omega_c_stm_init, omega_c_stm_init, 0.0, 0.0, M_c_stm_init)
+    posvel_c_initial = orbital_elements_to_sv(oe_c_initial)
+    r_c_initial = SVector{3}(posvel_c_initial[1:3])
+    v_c_initial = SVector{3}(posvel_c_initial[4:6])
+    oe_c_eval = sv_to_orbital_elements(CartesianStateECI(r_c_initial, v_c_initial))
+
+    # 90°分離に固定
+    angle_rad = deg2rad(90.0)
+    dv_R_val_comp=delta_v_magnitude*cos(angle_rad); dv_T_val_comp=delta_v_magnitude*sin(angle_rad)
+    dv_lvlh_vec=SVector(dv_R_val_comp,dv_T_val_comp,0.0); dr_lvlh_vec=SVector(10.0,0.0,0.0)
+    state_d_initial = cw_to_eci_deputy_state(r_c_initial, v_c_initial, dr_lvlh_vec, dv_lvlh_vec)
+    oe_d_initial = sv_to_orbital_elements(state_d_initial)
+    
+    roe_initial = orbital_elements_to_qns_roe_koenig(oe_c_eval, oe_d_initial)
+    roe_aug_init_debug = SVector(
+        roe_initial.delta_a_norm, roe_initial.delta_lambda, roe_initial.delta_ex,
+        roe_initial.delta_ey, roe_initial.delta_ix, roe_initial.delta_iy, 0.0
+    )
+
+    # --- 2. 10軌道周期後の状態を2つの方法で計算 ---
+    println("\n--- 2. 10軌道周期後の状態を計算 (STM vs 数値プロパゲータ) ---")
+    t_prop = 10.0 * 2.0 * pi * sqrt(oe_c_eval.a^3 / mu_earth)
+    println("伝播時間: $t_prop 秒 (10軌道周期)")
+
+    # (A) STMによる伝播
+    omega_c_ti=oe_c_eval.omega; omega_dot_j2,Omega_dot_j2=get_secular_j2_rates_koenig(oe_c_eval.a,oe_c_eval.e,oe_c_eval.i)
+    omega_c_tf=mod(oe_c_eval.omega+omega_dot_j2*t_prop,2*pi)
+    J_ti=get_J_qns_augmented_koenig(omega_c_ti); J_tf_inv=get_J_qns_inv_augmented_koenig(omega_c_tf)
+    roe_prime_init = J_ti * roe_aug_init_debug
+    A_kep_p, A_j2_p, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(oe_c_eval.a,oe_c_eval.e,oe_c_eval.i,omega_c_ti,true,false,NO_DRAG)
+    STM_prime = get_STM_prime_qns_augmented_koenig_model_selectable(A_kep_p,A_j2_p,A_drag_p,t_prop,oe_c_eval.e,false,NO_DRAG)
+    roe_prime_final = STM_prime * roe_prime_init
+    roe_final_stm = J_tf_inv * roe_prime_final
+
+    # (B) SatelliteToolboxのプロパゲータによる「真値」の計算
+    keps_c_init = KeplerianElements(0.0, oe_c_eval.a, oe_c_eval.e, oe_c_eval.i, oe_c_eval.RAAN, oe_c_eval.omega, oe_c_eval.f_true)
+    keps_d_init = KeplerianElements(0.0, oe_d_initial.a, oe_d_initial.e, oe_d_initial.i, oe_d_initial.RAAN, oe_d_initial.omega, oe_d_initial.f_true)
+    j2_prop_c = Propagators.init(Val(:J2), keps_c_init)
+    j2_prop_d = Propagators.init(Val(:J2), keps_d_init)
+    rf_c, vf_c = Propagators.propagate!(j2_prop_c, t_prop)
+    rf_d, vf_d = Propagators.propagate!(j2_prop_d, t_prop)
+    oe_c_final_prop = sv_to_orbital_elements(CartesianStateECI(rf_c, vf_c))
+    oe_d_final_prop = sv_to_orbital_elements(CartesianStateECI(rf_d, vf_d))
+    roe_final_prop = orbital_elements_to_qns_roe_koenig(oe_c_final_prop, oe_d_final_prop)
+    
+    # --- 3. 最終ROEの比較 ---
+    println("\n--- 3. 最終ROEの比較 ---")
+    println("          \t| STMによる予測 \t| 数値プロパゲータによる真値")
+    println("--------------------------------------------------------------------")
+    @printf "δa_norm \t| %.3e \t| %.3e\n" roe_final_stm[1] roe_final_prop.delta_a_norm
+    @printf "δλ (rad)\t| %.3e \t| %.3e\n" roe_final_stm[2] roe_final_prop.delta_lambda
+    @printf "δex \t\t| %.3e \t| %.3e\n" roe_final_stm[3] roe_final_prop.delta_ex
+    @printf "δey \t\t| %.3e \t| %.3e\n" roe_final_stm[4] roe_final_prop.delta_ey
+    @printf "δix (rad)\t| %.3e \t| %.3e\n" roe_final_stm[5] roe_final_prop.delta_ix
+    @printf "δiy (rad)\t| %.3e \t| %.3e\n" roe_final_stm[6] roe_final_prop.delta_iy
+
+    # --- 4. 最終相対位置の比較 ---
+    # STMから再構成
+    oe_deputy_reconstructed = final_roe_to_deputy_oe(oe_c_final_prop, roe_final_stm)
+    posvel_deputy_reconstructed = orbital_elements_to_sv(oe_deputy_reconstructed)
+    
+    # ★★★ 修正: SVectorとして明示的に取り出す ★★★
+    r_deputy_reconstructed = SVector{3}(posvel_deputy_reconstructed[1:3])
+    v_deputy_reconstructed = SVector{3}(posvel_deputy_reconstructed[4:6])
+
+    # ★★★ 修正: 正しい引数で eci_to_hill を呼び出す ★★★
+    rel_pos_stm_hill = eci_to_hill(r_deputy_reconstructed, v_deputy_reconstructed, rf_c, vf_c)
+
+    # プロパゲータから計算
+    rel_pos_prop_hill = eci_to_hill(rf_d, vf_d, rf_c, vf_c)
+    
+    println("\n--- 4. 最終相対位置(Hill)の比較 [m] ---")
+    println("      \t| STMから再構成 \t| 数値プロパゲータによる真値")
+    println("----------------------------------------------------------")
+    @printf "R (x) \t| %12.3f \t| %12.3f\n" rel_pos_stm_hill[1] rel_pos_prop_hill[1]
+    @printf "T (y) \t| %12.3f \t| %12.3f\n" rel_pos_stm_hill[2] rel_pos_prop_hill[2]
+    @printf "N (z) \t| %12.3f \t| %12.3f\n" rel_pos_stm_hill[3] rel_pos_prop_hill[3]
 end
 
 # --- プロットとHTMLレポート作成関数 ---
@@ -647,8 +769,11 @@ function plot_results(angles_plot_list, roe_data_log, perturbation_setting, drag
             plot_j2_final_list = []
             plot_title_suffix_j2_final = " (Final Rel. J2)"
             push!(plot_j2_final_list, plot(angles_for_final_j2_plot, filter_outliers_iqr(roe_data_log[:final_rel_j2_r][valid_final_j2_indices]), title="J2 (Radial Hill)"*plot_title_main_suffix, legend=false, m=:o, ms=2, xlims=xlims_plot, ylabel="a_R (m/s^2)"))
+            # T方向のプロット
             push!(plot_j2_final_list, plot(angles_for_final_j2_plot, filter_outliers_iqr(roe_data_log[:final_rel_j2_t][valid_final_j2_indices]), title="J2 (Along-track Hill)"*plot_title_main_suffix, legend=false, m=:o, ms=2, xlims=xlims_plot, ylabel="a_T (m/s^2)"))
+            # N方向のプロット
             push!(plot_j2_final_list, plot(angles_for_final_j2_plot, filter_outliers_iqr(roe_data_log[:final_rel_j2_n][valid_final_j2_indices]), title="J2 (Cross-track Hill)"*plot_title_main_suffix, legend=false, m=:o, ms=2, xlims=xlims_plot, ylabel="a_N (m/s^2)"))
+        
             push!(plot_j2_final_list, plot(angles_for_final_j2_plot, filter_outliers_iqr(roe_data_log[:final_rel_j2_norm][valid_final_j2_indices]), title="J2 (Norm ECI)"*plot_title_main_suffix, legend=false, m=:o, ms=2, xlims=xlims_plot, ylabel="||a_J2_rel|| (m/s^2)", xlabel="Sep. Angle (deg)"))
             plot_obj_j2_final = plot(plot_j2_final_list..., layout=(2,2), size=(1000,700), titlefont=font(6), tickfont=font(5), guidefont=font(6))
             plot_base64_j2_final = plot_to_base64_string(plot_obj_j2_final)
@@ -774,7 +899,11 @@ function main_simulation(
         
         final_separation_distance = norm(r_deputy_eci_final_val - r_chief_eci_final_val)
         if mod(angle_val, 90) == 0
-            @printf "  [Angle %.0f deg] Final Separation Distance: %.2f km\n" angle_val (final_separation_distance / 1000.0)
+            @printf "  [Angle %.0f deg] Final Separation Distance: %.2f m\n" angle_val (final_separation_distance)
+            # 最終的な相対位置をHill座標系で計算
+            rel_pos_hill_final = eci_to_hill_rel_pos(r_deputy_eci_final_val, r_chief_eci_final_val, v_chief_eci_final_val)
+            @printf "    (Hill Coords -> R: %.2f m, T: %.2f m, N: %.2f m)\n" (rel_pos_hill_final[1]) (rel_pos_hill_final[2]) (rel_pos_hill_final[3])
+
         end
 
         if total_cost<min_cost&&isfinite(total_cost); min_cost=total_cost; optimal_angle_deg=angle_val; end
@@ -795,7 +924,8 @@ function run_all_cases()
 end
 
 run_all_cases()
-run_state_reconstruction_test() # デバッグ用関数を実行
-debug_stm_propagation_long_term() # デバッグ関数を実行
+run_state_reconstruction_test()
+debug_stm_propagation_long_term()
 debug_with_inclination()
-debug_stm_components() # 新しいデバッグ関数を実行
+debug_stm_components()
+debug_reconstruction_with_propagator()
