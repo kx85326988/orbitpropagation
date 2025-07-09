@@ -1027,6 +1027,7 @@ function main_simulation(
     )
     println("Pert: $perturbation_setting, J2: $include_j2_active, Drag STM active: $include_drag_active_stm (Model: $drag_model_setting), Separation Plane: $separation_plane_setting")
 
+    # ★★★ 固定の伝播時間を設定 (デフォルト軌道10周期時間)★★★
     fixed_propagation_time = 10.0 * 2.0 * pi * sqrt(oe_chief_eval.a^3 / mu_earth)
     println("Fixed propagation time set to 10 orbits: $(fixed_propagation_time) seconds")
 
@@ -1086,13 +1087,13 @@ function main_simulation(
         # STM_prime = get_STM_prime_qns_augmented_koenig_model_selectable(
         #     A_kep_p, A_j2_p, A_drag_p, 
         #     tf_val, 
-        #     oe_chief_eval.e, # この引数も渡す必要がある
+        #     oe_chief_eval.e,
         #     include_drag_active_stm, 
         #     drag_model_setting
         # )
         # --- ★★★ ここまでが修正箇所 ★★★ ---
         STM_prime = get_STM_prime_from_appendix_c(
-            oe_chief_eval.a, oe_chief_eval.e, oe_chief_eval.i, omega_c_ti, tf_val
+            oe_chief_eval.a, oe_chief_eval.e, oe_chief_eval.i, omega_c_ti, oe_chief_eval.RAAN , tf_val
             )
         # ただし、J2やDRAGが含まれないケースでは、元の単純なSTMを使うように分岐する
         if !include_j2_active && !include_drag_active_stm # KEPLER_ONLY
