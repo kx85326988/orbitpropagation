@@ -231,6 +231,220 @@ function get_STM_prime_qns_augmented_koenig_model_selectable(A_kep_prime::SMatri
     else; return SMatrix{7,7,Float64}(I)+A_kep_J2_prime*t_prop; end
 end
 
+# ★★★ Appendix A 式(A6) を直接実装する新しいSTM構築関数 ★★★
+function get_stm_j2_from_appendix_a6(
+    ac::Float64, ec::Float64, ic::Float64, ωc::Float64, Ωc::Float64, t::Float64, 
+)::SMatrix{7,7,Float64}
+
+    # --- 物理定数と基本パラメータ ---
+    n_c = sqrt(mu_earth / ac^3)
+
+    # --- 論文 式(14)の置換変数 ---
+    eta = sqrt(1.0 - ec^2)
+    kappa = (3.0/4.0) * J2_coeff * (R_E/ac)^2 * n_c / (eta^4) # 論文の a^7/2 * sqrt(mu) を n*a^3.5 で表現
+    E = 1.0 + eta
+    F = 4.0 + 3.0 * eta
+    G = 1.0 / eta^2
+
+    # --- 論文 式(15)の置換変数 ---
+    cos_i = cos(ic)
+    sin_i = sin(ic)
+    P = 3.0*cos_i^2 - 1.0
+    Q = 5.0*cos_i^2 - 1.0
+    R = cos_i
+    S = sin(2.0*ic)
+    T = sin_i^2
+
+    # --- J2による近地点引数の永年変化率 ---
+    omega_dot = kappa * Q
+    Ω_dot = -2 * kappa * R
+    ωc_f = ωc + omega_dot * t
+    Ωc_f = Ωc + Ω_dot * t
+
+    # --- 変換後の離心率ベクトル成分 (t_iで評価) ---
+    ex_prime = ec * cos(ωc)
+    ey_prime = ec * sin(ωc)
+    ex_f = ec * cos(ωc_f)
+    ey_f = ec * sin(ωc_f)
+
+    # --- STMの各要素を式(C2)から実装 ---
+    Φ = @MMatrix zeros(Float64, 7, 7)
+
+    # 対角要素
+    Φ[1,1] = 1.0
+    Φ[2,2] = 1.0
+    Φ[5,5] = 1.0
+    Φ[6,6] = 1.0
+    Φ[7,7] = 1.0
+
+    # 第1列 (δa'への依存)
+    Φ[2,1] = -(1.5*n_c + 3.5*kappa*E*P)*t
+    Φ[3,1] = 3.5*kappa*ey_f*Q*t
+    Φ[4,1] = -3.5*kappa*ex_f*Q*t
+    Φ[6,1] = 3.5*kappa*S*t
+
+    # 第2列 (δλ'への依存)
+    # (ゼロ)
+
+    # 第3列 (δex'への依存)
+    Φ[2,3] = (kappa*ex_prime*F*G*P)*t
+    Φ[3,3] = cos(omega_dot*t)-4*kappa*ex_prime*ey_f*G*Q*t
+    Φ[4,3] = sin(omega_dot*t)+4*kappa*ex_prime*ex_f*G*Q*t
+    Φ[6,3] = -4.0*kappa*ex_prime*G*S*t
+
+    # 第4列 (δey'への依存)
+    Φ[2,4] = (kappa*ey_prime*F*G*P)*t
+    Φ[3,4] = -sin(omega_dot*t)-4*kappa*ey_prime*ey_f*G*Q*t
+    Φ[4,4] = cos(omega_dot*t)+-4*kappa*ey_prime*ex_f*G*Q*t
+    Φ[6,4] = -4.0*kappa*ey_prime*G*S*t
+
+    # 第5列 (δix'への依存)
+    Φ[2,5] = -kappa*F*S*t
+    Φ[3,5] = 5.0*kappa*ey_f*S*t
+    Φ[4,5] = -5.0*kappa*ex_f*S*t
+    Φ[6,5] = 2.0*kappa*T*t
+
+    return SMatrix(Φ)
+end
+
+
+# ★★★ 2つのSTM計算方法を比較するためのデバッグ関数 ★★★
+function debug_j2_stm_methods()
+    println("\n\n--- J2_ONLY STM の2つの計算方法の比較を開始します ---")
+
+    # --- 1. main_simulation と同じ現実的な初期条件を設定 ---
+    oe_c_initial = OrbitalElementsClassical(a_c_stm_init, e_c_stm_init, i_c_stm_init, Omega_c_stm_init, omega_c_stm_init, 0.0, 0.0, M_c_stm_init)
+    posvel_c_initial = orbital_elements_to_sv(oe_c_initial)
+    oe_c_eval = sv_to_orbital_elements(CartesianStateECI(SVector{3}(posvel_c_initial[1:3]), SVector{3}(posvel_c_initial[4:6])))
+    
+    # 伝播時間 = 10軌道周期
+    t = 10.0 * 2.0 * pi * sqrt(oe_c_eval.a^3 / mu_earth)
+    println("伝播時間: $t 秒 (10軌道周期)")
+
+    # --- 2. 方法A (現在の構築的な方法) でSTMを計算 ---
+    A_kep_p, A_j2_p, _ = get_A_prime_qns_augmented_koenig_selectable(
+        oe_c_eval.a, oe_c_eval.e, oe_c_eval.i, oe_c_eval.omega, 
+        true, false, NO_DRAG
+    )
+    STM_prime_method_A = get_STM_prime_qns_augmented_koenig_model_selectable(
+        A_kep_p, A_j2_p, @SMatrix(zeros(7,7)), 
+        t, oe_c_eval.e, false, NO_DRAG
+    )
+    omega_dot_j2, _ = get_secular_j2_rates_koenig(oe_c_eval.a, oe_c_eval.e, oe_c_eval.i)
+    omega_c_tf = mod(oe_c_eval.omega + omega_dot_j2 * t, 2*pi)
+    J_ti = get_J_qns_augmented_koenig(oe_c_eval.omega)
+    J_tf_inv = get_J_qns_inv_augmented_koenig(omega_c_tf)
+    STM_method_A = J_tf_inv * STM_prime_method_A * J_ti
+
+    # --- 3. 方法B (Appendix A6 を直接実装) でSTMを計算 ---
+    STM_method_B = get_stm_j2_from_appendix_a6(oe_c_eval.a, oe_c_eval.e, oe_c_eval.i,oe_c_eval.omega, oe_c_eval.RAAN, t)
+
+    # --- 4. 2つのSTMの差を評価 ---
+    println("\n--- 4. 2つのSTMの差を評価 ---")
+    
+    diff_matrix = STM_method_A - STM_method_B
+    diff_norm = norm(diff_matrix)
+
+    @printf "STMの差のノルム: %.4e\n" diff_norm
+
+    if diff_norm < 1e-6 # 許容誤差
+        println("\n検証結果: 2つの方法で計算したSTMは一致しました。")
+        println("結論: J2摂動に関するSTMの実装は正しい可能性が高いです。")
+    else
+        println("\n警告: 2つの方法で計算したSTMが一致しません。")
+        println("結論: get_A_prime... または get_STM_prime... のJ2関連の実装にバグがあります。")
+        println("差分行列 (一部):")
+        show(stdout, "text/plain", round.(diff_matrix; digits=5))
+        println()
+    end
+end
+
+# ★★★ Appendix C, 式(C2) に基づくSTM構築関数 ★★★
+function get_STM_prime_from_appendix_c(
+    ac::Float64, ec::Float64, ic::Float64, ωc::Float64, Ωc::Float64, t::Float64, 
+)::SMatrix{7,7,Float64}
+
+    # --- 物理定数と基本パラメータ ---
+    n_c = sqrt(mu_earth / ac^3)
+
+    # --- 論文 式(14)の置換変数 ---
+    eta = sqrt(1.0 - ec^2)
+    kappa = (3.0/4.0) * J2_coeff * (R_E/ac)^2 * n_c / (eta^4) # 論文の a^7/2 * sqrt(mu) を n*a^3.5 で表現
+    E = 1.0 + eta
+    F = 4.0 + 3.0 * eta
+    G = 1.0 / eta^2
+
+    # --- 論文 式(15)の置換変数 ---
+    cos_i = cos(ic)
+    sin_i = sin(ic)
+    P = 3.0*cos_i^2 - 1.0
+    Q = 5.0*cos_i^2 - 1.0
+    R = cos_i
+    S = sin(2.0*ic)
+    T = sin_i^2
+
+    # --- J2による近地点引数の永年変化率 ---
+    omega_dot = kappa * Q
+    Ω_dot = -2 * kappa * R
+    ωc_f = ωc + omega_dot * t
+    Ωc_f = Ωc + Ω_dot * t
+
+    # --- 変換後の離心率ベクトル成分 (t_iで評価) ---
+    ex_prime = ec * cos(ωc)
+    ey_prime = ec * sin(ωc)
+    ex_f = ec * cos(ωc_f)
+    ey_f = ec * sin(ωc_f)
+
+    # --- STMの各要素を式(C2)から実装 ---
+    Φ = @MMatrix zeros(Float64, 7, 7)
+
+    # 対角要素
+    Φ[1,1] = 1.0
+    Φ[2,2] = 1.0
+    Φ[5,5] = 1.0
+    Φ[6,6] = 1.0
+    Φ[7,7] = 1.0
+
+    # 第1列 (δa'への依存)
+    Φ[2,1] = -(1.5*n_c + 3.5*kappa*E*P)*t
+    Φ[3,1] = 3.5*kappa*ey_f*Q*t
+    Φ[4,1] = -3.5*kappa*ex_f*Q*t
+    Φ[6,1] = 3.5*kappa*S*t
+
+    # 第2列 (δλ'への依存)
+    # (ゼロ)
+
+    # 第3列 (δex'への依存)
+    Φ[2,3] = (kappa*ex_prime*F*G*P)*t
+    Φ[3,3] = cos(omega_dot*t)-4*kappa*ex_prime*ey_f*G*Q*t
+    Φ[4,3] = sin(omega_dot*t)+4*kappa*ex_prime*ex_f*G*Q*t
+    Φ[6,3] = -4.0*kappa*ex_prime*G*S*t
+
+    # 第4列 (δey'への依存)
+    Φ[2,4] = (kappa*ey_prime*F*G*P)*t
+    Φ[3,4] = -sin(omega_dot*t)-4*kappa*ey_prime*ey_f*G*Q*t
+    Φ[4,4] = cos(omega_dot*t)+-4*kappa*ey_prime*ex_f*G*Q*t
+    Φ[6,4] = -4.0*kappa*ey_prime*G*S*t
+
+    # 第5列 (δix'への依存)
+    Φ[2,5] = -kappa*F*S*t
+    Φ[3,5] = 5.0*kappa*ey_f*S*t
+    Φ[4,5] = -5.0*kappa*ex_f*S*t
+    Φ[6,5] = 2.0*kappa*T*t
+
+    # 第6列 (δiy'への依存)
+    # (ゼロ)
+
+    # 第7列 (δa_dot_dragへの依存)
+    Φ[1,7] = t
+    Φ[2,7] = (-3.0/4.0*n_c-7.0/4.0*kappa*E*P+kappa*ec*(1.0-ec)*F*G*P/2.0)*t^2.0
+    Φ[3,7] = (1.0-ec)*cos(ωc_f)*t-kappa*ey_f*Q*(-7.0/4.0+2.0*ec*(1.0-ec)*G)*t^2.0
+    Φ[4,7] = (1.0-ec)*sin(ωc_f)*t+kappa*ex_f*Q*(-7.0/4.0+2.0*ec*(1.0-ec)*G)*t^2.0
+    Φ[6,7] = kappa*S*(7.0/4.0-2.0*ec*(1-ec)*G)*t^2.0
+
+    return SMatrix(Φ)
+end
+
 # --- 外れ値を除去するヘルパー関数 ---
 function filter_outliers_iqr(data_vector::Vector{Float64})
     finite_data = filter(isfinite, data_vector)
@@ -862,23 +1076,38 @@ function main_simulation(
         
         omega_c_tf_val=oe_chief_at_tf.omega; J_ti=get_J_qns_augmented_koenig(omega_c_ti); J_tf_inv=get_J_qns_inv_augmented_koenig(omega_c_tf_val); roe_prime_init=J_ti*roe_aug_init_vec
         
-        # --- ★★★ ここからが修正箇所 ★★★ ---
-        
         # 1. プラント行列の各成分を個別に取得する
         A_kep_p, A_j2_p, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(
             oe_chief_eval.a, oe_chief_eval.e, oe_chief_eval.i, omega_c_ti, 
             include_j2_active, include_drag_active_stm, drag_model_setting
         )
         
-        # 2. 分離されたプラント行列をSTM計算関数に渡す
-        STM_prime = get_STM_prime_qns_augmented_koenig_model_selectable(
-            A_kep_p, A_j2_p, A_drag_p, 
-            tf_val, 
-            oe_chief_eval.e, # この引数も渡す必要がある
-            include_drag_active_stm, 
-            drag_model_setting
-        )
+        # # 2. 分離されたプラント行列をSTM計算関数に渡す
+        # STM_prime = get_STM_prime_qns_augmented_koenig_model_selectable(
+        #     A_kep_p, A_j2_p, A_drag_p, 
+        #     tf_val, 
+        #     oe_chief_eval.e, # この引数も渡す必要がある
+        #     include_drag_active_stm, 
+        #     drag_model_setting
+        # )
         # --- ★★★ ここまでが修正箇所 ★★★ ---
+        STM_prime = get_STM_prime_from_appendix_c(
+            oe_chief_eval.a, oe_chief_eval.e, oe_chief_eval.i, omega_c_ti, tf_val
+            )
+        # ただし、J2やDRAGが含まれないケースでは、元の単純なSTMを使うように分岐する
+        if !include_j2_active && !include_drag_active_stm # KEPLER_ONLY
+            A_kep_p, _, _ = get_A_prime_qns_augmented_koenig_selectable(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i,omega_c_ti,false,false,NO_DRAG)
+            STM_prime = SMatrix{7,7,Float64}(I) + A_kep_p * tf_val
+        elseif include_j2_active && !include_drag_active_stm # J2_ONLY
+            A_kep_p, A_j2_p, _ = get_A_prime_qns_augmented_koenig_selectable(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i,omega_c_ti,true,false,NO_DRAG)
+            STM_prime = SMatrix{7,7,Float64}(I) + (A_kep_p + A_j2_p) * tf_val
+        elseif !include_j2_active && include_drag_active_stm # DRAG_ONLY
+             # DRAG_ONLY の場合は、J2の係数をゼロにしてAppendix Cの式を呼び出すのが一つの方法
+             # ただし、ここでは元の単純なモデルを維持する
+             _, _, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i,omega_c_ti,false,true,DENSITY_MODEL_FREE)
+             A_kep_p, _, _ = get_A_prime_qns_augmented_koenig_selectable(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i,omega_c_ti,false,false,NO_DRAG)
+             STM_prime = get_STM_prime_qns_augmented_koenig_model_selectable(A_kep_p, SMatrix{7,7,Float64}(I), A_drag_p, tf_val, oe_chief_eval.e, true, DENSITY_MODEL_FREE)
+        end
         
         roe_prime_final=STM_prime*roe_prime_init; roe_aug_final_vec=J_tf_inv*roe_prime_final
         
@@ -919,7 +1148,7 @@ end
 function run_all_cases()
     main_simulation(KEPLER_ONLY, NO_DRAG, RT_PLANE)
     main_simulation(J2_ONLY, NO_DRAG, RT_PLANE)
-    main_simulation(DRAG_ONLY, DENSITY_MODEL_FREE, RT_PLANE)
+    # main_simulation(DRAG_ONLY, DENSITY_MODEL_FREE, RT_PLANE)
     main_simulation(J2_AND_DRAG, DENSITY_MODEL_FREE, RT_PLANE)
 end
 
@@ -929,3 +1158,4 @@ debug_stm_propagation_long_term()
 debug_with_inclination()
 debug_stm_components()
 debug_reconstruction_with_propagator()
+debug_j2_stm_methods()

@@ -18,7 +18,7 @@ println("\nステップ1: シンボル変数を定義")
 @variables dv_R dv_T dv_N
 
 # J2摂動の置換変数
-@variables κ η P Q S T G F
+@variables κ η P Q S T G F E
 
 println("完了。")
 
@@ -60,7 +60,7 @@ A_kep_J2_prime[2,1] = -1.5*n_c
 A_kep_J2_prime[2,1] += -3.5*κ*E*P
 A_kep_J2_prime[2,3] = κ*e_c*F*G*P
 A_kep_J2_prime[2,5] = -κ*F*S
-A_kep_J2_prime[4,1] = -3.5*e_c*Q
+A_kep_J2_prime[4,1] = -3.5*κ*e_c*Q
 A_kep_J2_prime[4,3] = 4.0*κ*e_c^2*G*Q
 A_kep_J2_prime[4,5] = -5.0*κ*e_c^2*S 
 A_kep_J2_prime[6,1] = 3.5*κ*S
