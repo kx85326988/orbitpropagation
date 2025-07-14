@@ -14,7 +14,7 @@ const R_E = 6378137.0            # 地球半径 (m)
 
 # --- 主衛星の初期軌道要素 ---
 a_c_stm_init = 6903137.0        # m
-e_c_stm_init = 0.0022           #
+e_c_stm_init = 0.022            #
 i_c_stm_init = deg2rad(97.65)   #
 Omega_c_stm_init = deg2rad(0.0) #
 omega_c_stm_init = deg2rad(0.0) #
@@ -885,6 +885,62 @@ function debug_reconstruction_with_propagator()
     @printf "N (z) \t| %12.3f \t| %12.3f\n" rel_pos_stm_hill[3] rel_pos_prop_hill[3]
 end
 
+# 相対J2摂動力の場を調査するためのデバッグ関数 
+function debug_j2_perturbation_field()
+    println("\n\n--- 相対J2摂動力の場を調査するデバッグを開始します ---")
+
+    # --- 1. 基準となる主衛星の軌道と、分離距離を設定 ---
+    oe_chief_base = OrbitalElementsClassical(
+        a_c_stm_init, e_c_stm_init, i_c_stm_init, 
+        Omega_c_stm_init, omega_c_stm_init, 0.0, 0.0, M_c_stm_init
+    )
+    
+    # ★★★ 修正: 分離距離を変数として関数の冒頭で定義 ★★★
+    separation_distance = 5.0 # [m]
+
+    # --- 2. 軌道上の代表的なポイント（平均近点離角）でループ ---
+    println("\n--- J2摂動の相対的な力の大きさを計算 ---")
+    # ★★★ 修正: ログ出力に分離距離の変数を埋め込む ★★★
+    @printf "主衛星の軌道上の各点において、特定の方向に %.1f m 分離した場合の相対J2摂動力ノルム [m/s^2]\n" separation_distance
+    println("="^80)
+    @printf "%-18s | %-18s | %-18s | %-18s\n" "主衛星の位相 (M)" "R方向分離" "T方向分離" "N方向分離"
+    println("="^80)
+
+    for M_deg in 0.0:45.0:360.0
+        # 現在の主衛星の軌道要素を計算
+        current_M = deg2rad(M_deg)
+        # f_trueとnはorbital_elements_to_sv内で計算されるのでダミー値でOK
+        oe_chief_current = OrbitalElementsClassical(
+            oe_chief_base.a, oe_chief_base.e, oe_chief_base.i, oe_chief_base.RAAN,
+            oe_chief_base.omega, 0.0, 0.0, current_M
+        )
+        posvel_chief_eci = orbital_elements_to_sv(oe_chief_current)
+        r_chief_eci = SVector{3}(posvel_chief_eci[1:3])
+        v_chief_eci = SVector{3}(posvel_chief_eci[4:6])
+
+        # --- 3. 各分離方向に対して相対J2摂動を計算 ---
+        
+        # R方向分離
+        dr_lvlh_r = SVector(separation_distance, 0.0, 0.0)
+        state_d_r = cw_to_eci_deputy_state(r_chief_eci, v_chief_eci, dr_lvlh_r, SVector(0.0,0.0,0.0))
+        rel_j2_r = calculate_j2_perturbation_eci(state_d_r.r_vec, mu_earth, J2_coeff, R_E) - calculate_j2_perturbation_eci(r_chief_eci, mu_earth, J2_coeff, R_E)
+
+        # T方向分離
+        dr_lvlh_t = SVector(0.0, separation_distance, 0.0)
+        state_d_t = cw_to_eci_deputy_state(r_chief_eci, v_chief_eci, dr_lvlh_t, SVector(0.0,0.0,0.0))
+        rel_j2_t = calculate_j2_perturbation_eci(state_d_t.r_vec, mu_earth, J2_coeff, R_E) - calculate_j2_perturbation_eci(r_chief_eci, mu_earth, J2_coeff, R_E)
+
+        # N方向分離
+        dr_lvlh_n = SVector(0.0, 0.0, separation_distance)
+        state_d_n = cw_to_eci_deputy_state(r_chief_eci, v_chief_eci, dr_lvlh_n, SVector(0.0,0.0,0.0))
+        rel_j2_n = calculate_j2_perturbation_eci(state_d_n.r_vec, mu_earth, J2_coeff, R_E) - calculate_j2_perturbation_eci(r_chief_eci, mu_earth, J2_coeff, R_E)
+
+        # 結果を出力
+        @printf "M = %-14.1f | %.4e | %.4e | %.4e\n" M_deg norm(rel_j2_r) norm(rel_j2_t) norm(rel_j2_n)
+    end
+    println("="^80)
+end
+
 # --- プロットとHTMLレポート作成関数 ---
 function plot_results(angles_plot_list, roe_data_log, perturbation_setting, drag_model_setting, separation_plane_setting)
     if isempty(angles_plot_list)
@@ -1160,3 +1216,4 @@ debug_with_inclination()
 debug_stm_components()
 debug_reconstruction_with_propagator()
 debug_j2_stm_methods()
+debug_j2_perturbation_field()
