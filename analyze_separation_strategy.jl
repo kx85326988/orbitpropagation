@@ -21,9 +21,16 @@ omega_c_stm_init = deg2rad(0.0) #
 M_c_stm_init = deg2rad(0.0)     #
 
 # --- 編隊飛行関連パラメータ ---
-delta_v_magnitude = 0.1 # m/s
-delta_a_dot_drag_initial_normalized = -1.0e-7 # [1/s]
+delta_v_magnitude = 0.01 # m/s
+const dr_lvlh_init = SVector(0.0, 0.0, 0.0) # 初期の相対位置ベクトル (m)
+const PROPAGATION_ORBITS = 0.1 # 伝播時間 (軌道周期の倍数)
+delta_a_dot_drag_initial_normalized = -4.6e-11 # [1/s]
 delta_B_initial_param = 0.01 # 仮の差動弾道係数
+
+# --- Target Box Definition ---
+const TARGET_a_delta_a_max = 1.0  # [m]
+const TARGET_a_delta_e_norm_max = 10.0 # [m] (5mx10m楕円に対応)
+const TARGET_a_delta_i_norm_max = 5.0 # [m]
 
 # --- 構造体定義 ---
 # プログラム内で一貫して使用するためのカスタム構造体
@@ -1074,6 +1081,9 @@ function main_simulation(
     oe_chief_eval = sv_to_orbital_elements(CartesianStateECI(r_chief_init_eci, v_chief_init_eci))
 
     optimal_angle_deg=-1.0; min_cost=Inf; angles_plot_list=Float64[]
+
+    successful_angles = Float64[]
+    
     roe_data_log=Dict(
         :initial_delta_a=>Float64[], :initial_delta_lambda=>Float64[], :initial_delta_ex=>Float64[], :initial_delta_ey=>Float64[], :initial_delta_ix=>Float64[], :initial_delta_iy=>Float64[],
         :final_delta_a=>Float64[], :final_delta_lambda=>Float64[], :final_delta_ex=>Float64[], :final_delta_ey=>Float64[], :final_delta_ix=>Float64[], :final_delta_iy=>Float64[],
@@ -1083,9 +1093,9 @@ function main_simulation(
     )
     println("Pert: $perturbation_setting, J2: $include_j2_active, Drag STM active: $include_drag_active_stm (Model: $drag_model_setting), Separation Plane: $separation_plane_setting")
 
-    # ★★★ 固定の伝播時間を設定 (デフォルト軌道10周期時間)★★★
-    fixed_propagation_time = 10.0 * 2.0 * pi * sqrt(oe_chief_eval.a^3 / mu_earth)
-    println("Fixed propagation time set to 10 orbits: $(fixed_propagation_time) seconds")
+    # 固定の伝播時間を設定 
+    fixed_propagation_time = PROPAGATION_ORBITS * 2.0 * pi * sqrt(oe_chief_eval.a^3 / mu_earth)
+    println("Fixed propagation time set: $(fixed_propagation_time) seconds")
 
     # # ★★★ デバッグのための修正 ★★★
     # local fixed_propagation_time
@@ -1106,7 +1116,7 @@ function main_simulation(
         if separation_plane_setting==RT_PLANE; dv_R_val_comp=delta_v_magnitude*cos(angle_rad_val); dv_T_val_comp=delta_v_magnitude*sin(angle_rad_val);
         elseif separation_plane_setting==RN_PLANE; dv_R_val_comp=delta_v_magnitude*cos(angle_rad_val); dv_N_val_comp=delta_v_magnitude*sin(angle_rad_val);
         elseif separation_plane_setting==NT_PLANE; dv_T_val_comp=delta_v_magnitude*cos(angle_rad_val); dv_N_val_comp=delta_v_magnitude*sin(angle_rad_val); end
-        dv_lvlh_vec=SVector(dv_R_val_comp,dv_T_val_comp,dv_N_val_comp); dr_lvlh_vec=SVector(10.0,0.0,0.0)
+        dv_lvlh_vec=SVector(dv_R_val_comp,dv_T_val_comp,dv_N_val_comp); dr_lvlh_vec = dr_lvlh_init
         state_deputy_init_eci=cw_to_eci_deputy_state(r_chief_init_eci,v_chief_init_eci,dr_lvlh_vec,dv_lvlh_vec)
         r_dep_init_eci=state_deputy_init_eci.r_vec; v_dep_init_eci=state_deputy_init_eci.v_vec
         aj2_chief_init=calculate_j2_perturbation_eci(r_chief_init_eci,mu_earth,J2_coeff,R_E)
@@ -1192,12 +1202,28 @@ function main_simulation(
 
         end
 
-        if total_cost<min_cost&&isfinite(total_cost); min_cost=total_cost; optimal_angle_deg=angle_val; end
+        final_a_da = oe_chief_eval.a * roe_aug_final_vec[1]
+        final_a_de_norm = oe_chief_eval.a * sqrt(roe_aug_final_vec[3]^2 + roe_aug_final_vec[4]^2)
+        final_a_di_norm = oe_chief_eval.a * sqrt(roe_aug_final_vec[5]^2 + roe_aug_final_vec[6]^2)
+        
+        is_success_da = abs(final_a_da) < TARGET_a_delta_a_max
+        is_success_de = final_a_de_norm < TARGET_a_delta_e_norm_max
+        is_success_di = final_a_di_norm < TARGET_a_delta_i_norm_max
+
+        # デバッグログの出力
+        @printf "Angle: %3.0f deg -> [δa: %s (%.2fm)], [δe: %s (%.2fm)], [δi: %s (%.2fm)]\n" angle_val (is_success_da ? "OK" : "NG") final_a_da (is_success_de ? "OK" : "NG") final_a_de_norm (is_success_di ? "OK" : "NG") final_a_di_norm
+
+        if is_success_da && is_success_de && is_success_di
+            push!(successful_angles, angle_val)
+        end
     end
     println("ループ終了")
     println("\n--- 結果 (Pert: $perturbation_setting, DragModel: $drag_model_setting, Plane: $separation_plane_setting) ---")
-    if optimal_angle_deg!=-1.0; println("最適分離方向: $optimal_angle_deg deg"); println("最小コスト: $min_cost"); else; println("有効な解が見つかりませんでした。"); end
-    
+    if isempty(successful_angles)
+        println("ターゲットボックスを満たす分離方向は見つかりませんでした。")
+    else
+        println("成功した分離方向の範囲: ", minimum(successful_angles), " deg  ～ ", maximum(successful_angles), " deg")
+    end   
     plot_results(angles_plot_list, roe_data_log, perturbation_setting, drag_model_setting, separation_plane_setting)
 end
 
@@ -1205,7 +1231,7 @@ end
 function run_all_cases()
     main_simulation(KEPLER_ONLY, NO_DRAG, RT_PLANE)
     main_simulation(J2_ONLY, NO_DRAG, RT_PLANE)
-    # main_simulation(DRAG_ONLY, DENSITY_MODEL_FREE, RT_PLANE)
+    main_simulation(DRAG_ONLY, DENSITY_MODEL_FREE, RT_PLANE)
     main_simulation(J2_AND_DRAG, DENSITY_MODEL_FREE, RT_PLANE)
 end
 
