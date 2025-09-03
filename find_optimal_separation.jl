@@ -1,39 +1,42 @@
 # ==============================================================================
-# [ J2摂動下での低推力編隊形成のための最適分離マヌーバ探索プログラム ]
+# [ J2摂動と差動抗力を考慮した目標相対軌道形成のための最適分離マヌーバ探索 ]
 #
 # ## 目的 (Main Purpose)
-# 
-# このプログラムは，J2摂動と差動抗力の影響下で，特定の相対軌道（J2不変条件を満たす
-# 安定な編隊）を形成するための，最適な初期分離マヌーバ（分離方向と分離速度）を
-# 探索することを目的とする．
-# 燃料を消費しない差動抗力を利用しつつ，J2摂動による長期的な軌道のずれを最小化する
-# バランスの取れた解を見つけ出す．
+#
+# このプログラムは、低軌道環境で支配的なJ2摂動と差動抗力の影響下で、
+# あらかじめ設計された**「目標とする相対軌道」**を形成するための、最適な初期分離マヌーバ
+# （分離方向と分離速度）を探索することを目的とする。
+#
+# スラスタ（燃料）を消費しない差動抗力を利用して軌道エネルギー差を解消しつつ、
+# J2摂動による長期的な軌道のずれも考慮に入れ、最終的に目標の編隊形状に
+# 最も近づけるような、バランスの取れた解を見つけ出す。
 #
 # ## コードの流れ (Workflow)
 #
-# 1.  **初期条件と目標の設定:**
-#     - 主衛星の初期軌道要素，衛星の物理パラメータ（質量，面積など）を設定．
-#     - 目標とする相対軌道の形状（例: 0.5km x 1kmの楕円）と，編隊維持の安定性の指標と
-#       なる「J2不変条件」から，最終的に目指すべき理想的な相対軌道要素(ROE)を計算する．
+# 1.  **初期条件と目標ROEの定義:**
+#     - 主衛星の初期軌道要素や、差動抗力の効果をモデル化するパラメータを設定する。
+#     - ミッションで要求される物理的な制約（例：相対軌道の大きさ、許容される最大軌道面外ずれ）
+#       に基づき、最終的に目指すべき**理想的な7次元の相対軌道要素ベクトル（目標ROE）**を設計する。
 #
-# 2.  **パラメータ探索ループ:**
-#     - 分離速度の大きさと，分離方向（0°～360°）を変化させながら，二重のループで
-#       全ての組み合わせをテストする．
+# 2.  **分離マヌーバの全パターン探索:**
+#     - 分離速度の大きさと、軌道面内での分離方向（0°～360°）を変化させながら、
+#       二重のループ処理で全ての組み合わせを網羅的にテストする。
 #
-# 3.  **順伝播シミュレーション:**
-#     - 各分離マヌーバに対して，まず初期ROEを計算する．
-#     - Koenigらの論文に基づく状態遷移マトリックス(STM)を用いて，一定時間
-#       （例: 10軌道周期）後の最終的なROEを予測計算する．
+# 3.  **最終ROEの順伝播予測:**
+#     - 各分離マヌーバに対して、まず初期の相対軌道要素（ROE）を計算する。
+#     - Koenigらの論文に基づく状態遷移マトリックス（STM）を用いて、一定時間後
+#       （例: 10軌道周期後）の**最終的なROE**を高速に予測計算する。
 #
 # 4.  **コスト計算と最適解の探索:**
-#     - 計算された最終ROEが，ステップ1で設定した「J2不変条件を満たす理想のROE」から
-#       どれだけずれているかを「コスト」として定量化する．
-#     - 全ての分離マヌーバの中で，このコストが最小となるものを「最適解」として記録する．
+#     - 予測された最終ROEが、ステップ1で設計した「目標ROE」からどれだけずれているかを、
+#       **「重み付きの誤差二乗和」**としてコストを計算する。
+#       （例：軌道エネルギーの誤差は厳しく、位相の誤差は許容するなど重みで調整可能）
+#     - 全ての分離マヌーバの中で、このコストが最小となるものを「最適解」として記録する。
 #
-# 5.  **結果の表示と保存:**
-#     - 探索ループ終了後，見つかった最適な分離方向と分離速度をコンソールに出力する．
-#     - コストが分離方向と分離速度によってどう変化するかの全体像を3Dサーフェスプロットで
-#       可視化し，HTMLレポートとして保存する．
+# 5.  **結果の可視化と保存:**
+#     - 探索終了後、見つかった最適な分離方向と分離速度をコンソールに出力する。
+#     - コストが分離条件（方向、速度）によってどう変化するかの全体像を3Dサーフェスプロットで
+#       可視化し、HTMLレポートとして保存する。
 #
 # ==============================================================================
 using LinearAlgebra
@@ -189,6 +192,87 @@ function get_STM_prime_qns_augmented_koenig_model_selectable(A_kep_prime::SMatri
     else; return SMatrix{7,7,Float64}(I)+A_kep_J2_prime*t_prop; end
 end
 
+# ECI座標系の相対ベクトルを、主衛星中心のRTN（LVLH）座標系に変換する
+function eci_to_rtn(r_chief_eci::SVector{3,Float64}, v_chief_eci::SVector{3,Float64}, vec_eci::SVector{3,Float64})::SVector{3,Float64}
+    r_hat = normalize(r_chief_eci)
+    h_vec = cross(r_chief_eci, v_chief_eci)
+    n_hat = normalize(h_vec)
+    t_hat = cross(n_hat, r_hat)
+    
+    dcm_eci_to_rtn = transpose(hcat(r_hat, t_hat, n_hat))
+    
+    return dcm_eci_to_rtn * vec_eci
+end
+
+# ==============================================================================
+# [ 状態再構成プロセスの検証用テスト関数 ]
+# ==============================================================================
+function run_state_reconstruction_test()
+    println("\n\n--- 最終ROEからの状態再構成プロセスの検証を開始します ---")
+
+    # --- 1. 既知の初期状態を準備 ---
+    # 主衛星の初期状態 (テスト用にシンプルな値を使用)
+    oe_chief_initial_test = OrbitalElementsClassical(
+        7000e3, 0.01, deg2rad(50.0), deg2rad(10.0), deg2rad(20.0), 0.0, 0.0, deg2rad(30.0)
+    )
+    posvel_chief_initial_test = orbital_elements_to_sv(oe_chief_initial_test)
+    r_chief_initial_test = SVector{3}(posvel_chief_initial_test[1:3])
+    
+    # 副衛星の初期状態 (主衛星に対して意図的に100m程度のずれを持たせる)
+    oe_deputy_initial_true = OrbitalElementsClassical(
+        oe_chief_initial_test.a + 10.0, # a_d = a_c + 10m
+        oe_chief_initial_test.e + 0.0001,
+        oe_chief_initial_test.i + deg2rad(0.01),
+        oe_chief_initial_test.RAAN + deg2rad(0.01),
+        oe_chief_initial_test.omega + deg2rad(0.02),
+        0.0, 0.0,
+        oe_chief_initial_test.M + deg2rad(0.03)
+    )
+    posvel_deputy_initial_true = orbital_elements_to_sv(oe_deputy_initial_true)
+    r_deputy_initial_true = SVector{3}(posvel_deputy_initial_true[1:3])
+    v_deputy_initial_true = SVector{3}(posvel_deputy_initial_true[4:6])
+
+    println("--- 1. 検証用の「真の」状態を設定 ---")
+    println("主衛星の真のECI位置: ", r_chief_initial_test)
+    println("副衛星の真のECI位置: ", r_deputy_initial_true)
+    @printf("真の初期相対距離: %.3f m\n", norm(r_deputy_initial_true - r_chief_initial_test))
+
+    # --- 2. 順変換 (ECI -> ROE) ---
+    println("\n--- 2. 順変換 (ECI -> ROE) を実行 ---")
+    true_roes = orbital_elements_to_qns_roe_koenig(oe_chief_initial_test, oe_deputy_initial_true)
+    true_roes_augmented = SVector(
+        true_roes.delta_a_norm, true_roes.delta_lambda,
+        true_roes.delta_ex, true_roes.delta_ey,
+        true_roes.delta_ix, true_roes.delta_iy,
+        0.0 # ダミーの拡張パラメータ
+    )
+    println("計算された「真の」ROE: ", true_roes)
+
+    # --- 3. 逆変換 (ROE -> ECI) ---
+    println("\n--- 3. 逆変換 (ROE -> ECI) を実行 ---")
+    oe_deputy_reconstructed = final_roe_to_deputy_oe(oe_chief_initial_test, true_roes_augmented)
+    posvel_deputy_reconstructed_eci = orbital_elements_to_sv(oe_deputy_reconstructed)
+    r_deputy_reconstructed_eci = SVector{3}(posvel_deputy_reconstructed_eci[1:3])
+    v_deputy_reconstructed_eci = SVector{3}(posvel_deputy_reconstructed_eci[4:6])
+    
+    println("再構成された副衛星のECI位置: ", r_deputy_reconstructed_eci)
+
+    # --- 4. 比較・検証 ---
+    println("\n--- 4. 比較・検証 ---")
+    position_error_vec = r_deputy_initial_true - r_deputy_reconstructed_eci
+    position_error_norm = norm(position_error_vec)
+
+    @printf "位置ベクトルの誤差 (ノルム): %.4e m\n" position_error_norm
+
+    if position_error_norm < 1e-6 # 許容誤差を1マイクロメートルに設定
+        println("検証結果: 正常です。順変換と逆変換は整合しています。")
+    else
+        println("\n★★★★★ エラー ★★★★★")
+        println("検証結果: 異常です。状態再構成プロセスに大きな誤差が存在。")
+        println("バグは `final_roe_to_deputy_oe` 関数または `orbital_elements_to_sv` 関数にある可能性が非常に高いです。")
+    end
+end
+
 function plot_results(angles_plot_list, cost_data, perturbation_setting, drag_model_setting, separation_plane_setting)
     # 3Dサーフェスプロット用にデータを整形
     dv_mags = 0.001:0.001:0.05
@@ -241,9 +325,43 @@ end
 
 function find_j2_invariant_maneuver(perturbation_setting::PerturbationType, separation_plane_setting::SeparationPlane)
     drag_model_setting = DENSITY_MODEL_FREE
-    println("\n\n--- J2不変条件を満たす分離マヌーバの探索を開始します ---")
+    println("\n\n--- 目標ROEを達成するための最適分離マヌーバの探索を開始 ---")
     println("Pert: $perturbation_setting, Plane: $separation_plane_setting, Propagation: $PROPAGATION_ORBITS orbits")
-    
+
+    # ★★★ 1. 物理的なミッション要求から目標ROEターゲットを定義 ★★★
+
+    # --- 目標とする物理的な軌道形状 ---
+    TARGET_DELTA_E_NORM_METERS = 500.0 # [m] 相対軌道の短軸半径 (例: 0.5km)
+    TARGET_Z_MAX_METERS      = 10.0  # [m] 許容される最大軌道面外ずれ
+
+    # --- 物理要求をROEターゲットに変換 ---
+    roe_target_a_norm = 0.0
+    roe_target_lambda = 0.0
+
+    # a * δe = 500 [m] より、δe を計算
+    roe_target_ex     = TARGET_DELTA_E_NORM_METERS / a_c_stm_init
+    roe_target_ey     = 0.0
+
+    # δz_max ≈ a * |δiy| より、δiy を計算
+    # δix は面内分離なのでゼロを目標とする
+    roe_target_ix     = 0.0
+    roe_target_iy     = TARGET_Z_MAX_METERS / a_c_stm_init # ここでは正の値を目標とする
+
+    # 7次元の目標ROEベクトルを作成
+    roe_target_vec = SVector{7,Float64}(
+        roe_target_a_norm,
+        roe_target_lambda,
+        roe_target_ex,
+        roe_target_ey,
+        roe_target_ix,
+        roe_target_iy,
+        0.0 # 拡張パラメータ
+    )
+    println("物理要求に基づき、以下の目標ROEターゲットを設定しました。")
+    @printf " - 目標δex: %.3e (a*δe = %.1f m)\n" roe_target_vec[3] TARGET_DELTA_E_NORM_METERS
+    @printf " - 目標δiy: %.3e (max Z = %.1f m)\n" roe_target_vec[6] TARGET_Z_MAX_METERS
+    println("目標ROE全体: ", roe_target_vec)
+
     include_j2_active = (perturbation_setting == J2_ONLY || perturbation_setting == J2_AND_DRAG)
     include_drag_active_stm = (perturbation_setting == DRAG_ONLY || perturbation_setting == J2_AND_DRAG)
     
@@ -280,23 +398,25 @@ function find_j2_invariant_maneuver(perturbation_setting::PerturbationType, sepa
             STM_prime=get_STM_prime_qns_augmented_koenig_model_selectable(A_kep_p,A_j2_p,A_drag_p,tf_val,oe_chief_eval.e,include_drag_active_stm,drag_model_setting)
             roe_prime_final=STM_prime*roe_prime_init; roe_aug_final_vec=J_tf_inv*roe_prime_final
             
-            ac, ec, ic = oe_chief_at_tf.a, oe_chief_at_tf.e, oe_chief_at_tf.i
-            final_δa_norm, _, final_δex, _, final_δix, _ = roe_aug_final_vec
+            # ★★★ 新しいコスト関数の定義 (目標ROEとの誤差の重み付き二乗和) ★★★
 
-            eta_c = sqrt(1-ec^2)
-            delta_e_approx = final_δex 
-            delta_eta_approx = (-ec / eta_c) * delta_e_approx
-            C11 = (2*J2_coeff*R_E^2)/(4*ac^2*eta_c^5) * (4+3*eta_c) * (1+5*cos(ic)^2)
-            target_delta_a_norm = C11 * delta_eta_approx
-            actual_delta_a_norm = final_δa_norm
-            cost_1 = (actual_delta_a_norm - target_delta_a_norm)^2
+            # 誤差ベクトルを計算
+            error_vec = roe_aug_final_vec - roe_target_vec
 
-            C12 = (1-ec^2)*tan(ic)/(4*ec)
-            target_delta_e_approx = C12 * final_δix
-            actual_delta_e_approx = final_δex
-            cost_2 = (actual_delta_e_approx - target_delta_e_approx)^2
-            
-            total_cost = cost_1 + cost_2
+            # 各ROE要素の重要度に応じた重み付け行列を定義
+            # δaやδex/iyの誤差は厳しく、δλの誤差は許容するなど調整可能
+            W = Diagonal(SVector{7,Float64}(
+                1.0e6,   # δa_norm の重み (エネルギー差は非常に重要)
+                1.0,     # δlambda の重み (位相の重要度が低い場合)
+                1000.0,  # δex の重み (軌道形状)
+                1000.0,  # δey の重み (軌道形状)
+                1000.0,  # δix の重み (面外ずれ)
+                1000.0,  # δiy の重み (面外ずれ)
+                0.0      # 拡張パラメータはコストに含めない
+            ))
+
+            # 重み付きの誤差二乗和をコストとする (error_vec' * W * error_vec)
+            total_cost = dot(error_vec, W * error_vec)
             push!(cost_data, total_cost)
 
             if total_cost < optimal_cost
@@ -308,17 +428,140 @@ function find_j2_invariant_maneuver(perturbation_setting::PerturbationType, sepa
     println("探索ループ終了")
     
     println("\n--- 結果 ---")
-    println("J2不変条件を最もよく満たす最適な分離マヌーバ:")
+    println("最も目標ROEに近い最適な分離マヌーバ:")
     @printf "  分離方向: %.1f deg\n" optimal_params.angle
     @printf "  分離速度: %.4f m/s\n" optimal_params.dv_mag
-    @printf "  最小コスト（J2不変条件からの誤差の2乗和）: %.3e\n" optimal_cost
+    @printf "  最小コスト（目標ROEからの誤差の2乗和）: %.3e\n" optimal_cost
 
     plot_results(0.0:10.0:350.0, cost_data, perturbation_setting, drag_model_setting, separation_plane_setting)
+    return optimal_params
+end
+
+# ==============================================================================
+# [ 最適解の物理的状態を分析する関数 ]
+# ==============================================================================
+function analyze_optimal_result(optimal_angle_deg::Float64, optimal_dv_mag::Float64)
+    # println("\n\n--- 最適解の詳細分析を開始します ---")
+    @printf "入力: 分離方向 %.1f deg, 分離速度 %.4f m/s\n\n" optimal_angle_deg optimal_dv_mag
+
+    # --- 1. 最適マヌーバによる最終状態の再計算 ---
+    # (この部分は変更なし)
+    oe_chief_initial_for_sv = OrbitalElementsClassical(a_c_stm_init,e_c_stm_init,i_c_stm_init,Omega_c_stm_init,omega_c_stm_init,0.0,0.0,M_c_stm_init)
+    posvel_chief_initial_eci_vec = orbital_elements_to_sv(oe_chief_initial_for_sv)
+    r_chief_init_eci=SVector{3}(posvel_chief_initial_eci_vec[1:3]); v_chief_init_eci=SVector{3}(posvel_chief_initial_eci_vec[4:6])
+    oe_chief_eval = sv_to_orbital_elements(CartesianStateECI(r_chief_init_eci, v_chief_init_eci))
+    tf_val = PROPAGATION_ORBITS * 2.0 * pi * sqrt(oe_chief_eval.a^3 / mu_earth)
+    
+    angle_rad_val = deg2rad(optimal_angle_deg)
+    dv_R = optimal_dv_mag * cos(angle_rad_val)
+    dv_T = optimal_dv_mag * sin(angle_rad_val)
+    dv_lvlh_vec = SVector(dv_R, dv_T, 0.0)
+    
+    state_deputy_init_eci = cw_to_eci_deputy_state(r_chief_init_eci, v_chief_init_eci, dr_lvlh_init, dv_lvlh_vec)
+    oe_dep_init = sv_to_orbital_elements(state_deputy_init_eci)
+    qns_roes_init = orbital_elements_to_qns_roe_koenig(oe_chief_eval, oe_dep_init)
+    roe_aug_init_vec = SVector(qns_roes_init.delta_a_norm, qns_roes_init.delta_lambda, qns_roes_init.delta_ex, qns_roes_init.delta_ey, qns_roes_init.delta_ix, qns_roes_init.delta_iy, delta_a_dot_drag)
+
+    omega_dot_j2, Omega_dot_j2 = get_secular_j2_rates_koenig(oe_chief_eval.a, oe_chief_eval.e, oe_chief_eval.i)
+    oe_chief_at_tf = OrbitalElementsClassical(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i,mod(oe_chief_eval.RAAN+Omega_dot_j2*tf_val,2*pi),mod(oe_chief_eval.omega+omega_dot_j2*tf_val,2*pi),0.0,oe_chief_eval.n,mod(oe_chief_eval.M+oe_chief_eval.n*tf_val,2*pi))
+    
+    omega_c_ti=oe_chief_eval.omega; omega_c_tf_val=oe_chief_at_tf.omega; J_ti=get_J_qns_augmented_koenig(omega_c_ti); J_tf_inv=get_J_qns_inv_augmented_koenig(omega_c_tf_val);
+    roe_prime_init=J_ti*roe_aug_init_vec
+    A_kep_p, A_j2_p, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i,omega_c_ti,true,true,DENSITY_MODEL_FREE)
+    STM_prime=get_STM_prime_qns_augmented_koenig_model_selectable(A_kep_p,A_j2_p,A_drag_p,tf_val,oe_chief_eval.e,true,DENSITY_MODEL_FREE)
+    roe_prime_final=STM_prime*roe_prime_init;
+    
+    # ★★★ ここが重要 ★★★
+    # 最終ROEベクトルは、この行で計算されています
+    roe_aug_final_vec=J_tf_inv*roe_prime_final
+
+    # --- 2. 最終的な状態の表示 ---
+    oe_deputy_at_tf = final_roe_to_deputy_oe(oe_chief_at_tf, roe_aug_final_vec)
+    
+    posvel_chief_final = orbital_elements_to_sv(oe_chief_at_tf)
+    r_chief_final = SVector{3}(posvel_chief_final[1:3])
+    v_chief_final = SVector{3}(posvel_chief_final[4:6])
+
+    posvel_deputy_final = orbital_elements_to_sv(oe_deputy_at_tf)
+    r_deputy_final = SVector{3}(posvel_deputy_final[1:3])
+
+    relative_pos_eci = r_deputy_final - r_chief_final
+    relative_pos_rtn = eci_to_rtn(r_chief_final, v_chief_final, relative_pos_eci)
+
+    println("\n--- 編隊形成完了時の状態 ---")
+    println("■ 最終的な相対軌道要素 (ROE):")
+    @printf "  δa (規格化軌道長半径差): %.3e\n" roe_aug_final_vec[1]
+    @printf "  δλ (平均経度差):        %+.3f deg\n" rad2deg(roe_aug_final_vec[2])
+    @printf "  δex (離心率ベクトルx):    %.3e\n" roe_aug_final_vec[3]
+    @printf "  δey (離心率ベクトルy):    %.3e\n" roe_aug_final_vec[4]
+    @printf "  δix (軌道傾斜角ベクトルx):  %.3e\n" roe_aug_final_vec[5]
+    @printf "  δiy (軌道傾斜角ベクトルy):  %.3e\n" roe_aug_final_vec[6]
+    
+    println("\n■ 最終的な相対位置 (RTN座標系):")
+    @printf "  R (動径):    %+.2f m\n" relative_pos_rtn[1]
+    @printf "  T (進行):    %+.2f m\n" relative_pos_rtn[2]
+    @printf "  N (面外):    %+.2f m\n" relative_pos_rtn[3]
+    println("\t(注意：10軌道周期後の、ある瞬間の相対位置)")
+
+    # --- 3. 摂動の比較 (このセクションを以下のように変更) ---
+    
+    # J2摂動の計算用関数
+    function calculate_j2_accel(r_vec::SVector{3,Float64})::SVector{3,Float64}
+        x,y,z=r_vec; r_sq=dot(r_vec,r_vec); r=sqrt(r_sq);
+        term_common=-1.5*mu_earth*J2_coeff*R_E^2/(r^5); z_sq_r_sq=(z^2)/r_sq
+        ax=term_common*x*(1.0-5.0*z_sq_r_sq); ay=term_common*y*(1.0-5.0*z_sq_r_sq); az=term_common*z*(3.0-5.0*z_sq_r_sq)
+        return SVector(ax,ay,az)
+    end
+    j2_accel_chief = calculate_j2_accel(r_chief_final)
+    j2_accel_deputy = calculate_j2_accel(r_deputy_final)
+    
+    # ECI座標系での相対J2摂動ベクトル
+    relative_j2_accel_eci = j2_accel_deputy - j2_accel_chief
+    
+    # ★★★ ECIからRTN座標系へ変換 ★★★
+    relative_j2_accel_rtn = eci_to_rtn(r_chief_final, v_chief_final, relative_j2_accel_eci)
+    
+    # 各成分の大きさを取得
+    relative_j2_accel_norm = norm(relative_j2_accel_eci)
+    relative_j2_accel_n_comp = relative_j2_accel_rtn[3] # N方向成分
+
+    println("\n--- 摂動の比較 ---")
+    @printf "相対J2摂動の総量 (ノルム):      %.3e m/s^2\n" relative_j2_accel_norm
+    @printf "  └ 軌道面外(N)方向の成分:     %+.3e m/s^2\n" relative_j2_accel_n_comp
+
+    # --- 4. 相対的な太陽輻射圧の推定 (変更なし) ---
+    P_srp = 4.56e-6 
+    mass = 100.0 
+    C_r = 1.0 
+    A = 1.0 
+    delta_A_over_m = 0.1
+    
+    relative_srp_accel_mag_est = P_srp * C_r * delta_A_over_m
+
+    @printf "相対太陽輻射圧の大きさ (推定値): %.3e m/s^2\n" relative_srp_accel_mag_est
+    
+    # # --- 5. 比較と考察 ---
+    # if relative_j2_accel_norm > relative_srp_accel_mag_est
+    #     ratio = relative_j2_accel_norm / relative_srp_accel_mag_est
+    #     @printf "\n 相対J2摂動の総量は、相対太陽輻射圧の約 %.1f 倍の大きさ\n" ratio
+    # else
+    #     ratio = relative_srp_accel_mag_est / relative_j2_accel_norm
+    #     @printf "\n 相対太陽輻射圧は、相対J2摂動の約 %.1f 倍の大きさ\n" ratio
+    # end
 end
 
 # --- 実行 ---
 function run_target_search()
-    find_j2_invariant_maneuver(J2_AND_DRAG, RT_PLANE)
+    # 最適解の探索
+    optimal_params = find_j2_invariant_maneuver(J2_AND_DRAG, RT_PLANE)
+    
+    # 最適解の結果を分析
+    if optimal_params !== nothing
+        analyze_optimal_result(optimal_params.angle, optimal_params.dv_mag)
+    end
 end
 
 run_target_search()
+
+# 検証テストを実行
+run_state_reconstruction_test()

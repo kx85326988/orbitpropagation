@@ -21,17 +21,19 @@ omega_c_stm_init = deg2rad(0.0) #
 M_c_stm_init = deg2rad(0.0)     #
 
 # --- 編隊飛行関連パラメータ ---
-delta_v_magnitude = 0.0 # m/s
+delta_v_magnitude = 0.4 # m/s
 const dr_lvlh_init = SVector(0.0, 0.0, 0.0) # 初期の相対位置ベクトル (m)
-const PROPAGATION_ORBITS = 0.1 # 伝播時間 (軌道周期の倍数)
+const PROPAGATION_ORBITS = 10.0 # 伝播時間 (軌道周期の倍数)
 delta_a_dot_drag_initial_normalized = -4.6e-11 # [1/s]
 delta_B_initial_param = 0.01 # 仮の差動弾道係数
 
 # --- Target Box Definition ---
 const TARGET_a_delta_a_max = 1.0  # [m]
-const TARGET_a_delta_e_norm_max = 10.0 # [m] (5mx10m楕円に対応)
-const TARGET_a_delta_i_norm_max = 5.0 # [m]
+const TARGET_a_delta_e_norm_max = 500.0 # [m] (0.5km x 1km 楕円の短軸半径)
+const TARGET_a_delta_i_norm_max = 10.0 # [m] 面外のずれの許容上限
+
 const TARGET_ACQUISITION_DAYS = 30.0 # 編隊形成の目標日数
+const PROPAGATION_ORBITS = 10.0 # 評価を行う軌道周期数
 
 # --- 構造体定義 ---
 # プログラム内で一貫して使用するためのカスタム構造体
@@ -1063,6 +1065,36 @@ function plot_results(angles_plot_list, roe_data_log, perturbation_setting, drag
         
         write(f, "</body></html>")
     end
+
+    plot_title_main_suffix = " (Pert: $perturbation_setting, DragM: $drag_model_setting, Plane: $separation_plane_setting)"
+    xlims_plot = (0.0, angles_plot_list[end])
+
+    function plot_to_base64_string(p)
+        io = IOBuffer()
+        show(io, MIME"image/png"(), p)
+        return base64encode(take!(io))
+    end
+    # --- J2不変条件の誤差プロット ---
+    open(html_filename, "a") do f # "a" (append)モードでファイルに追記
+        write(f, "<div class='plot-container'><h2>J₂-Invariant Condition Errors</h2>")
+        
+        # error_eq1 が存在する場合のみプロット
+        if haskey(roe_data_log, :error_eq1) && !isempty(roe_data_log[:error_eq1])
+            plot_j2_error_list = []
+            
+            p1 = plot(angles_plot_list, roe_data_log[:error_eq1], title="Eq. (1.1) Error (δa vs δe)", legend=false, m=:o, ms=2, xlims=xlims_plot, ylabel="Error in δa_norm")
+            p2 = plot(angles_plot_list, roe_data_log[:error_eq2], title="Eq. (1.2) Error (δe vs δi)", legend=false, m=:o, ms=2, xlims=xlims_plot, ylabel="Error in δe_x", xlabel="Separation Angle (deg)")
+            
+            push!(plot_j2_error_list, p1, p2)
+            
+            plot_obj_j2_errors = plot(plot_j2_error_list..., layout=(2,1), size=(1000,700), titlefont=font(6), tickfont=font(5), guidefont=font(6))
+            plot_base64_j2_errors = plot_to_base64_string(plot_obj_j2_errors)
+            write(f, "<img src=\"data:image/png;base64,$(plot_base64_j2_errors)\"/></div>")
+            println("J2不変条件の誤差プロットをHTMLに埋め込みました。")
+        end
+        
+        write(f, "</body></html>")
+    end
     println("HTMLレポートを保存しました: $html_filename")
 end
 
@@ -1228,99 +1260,123 @@ function main_simulation(
     plot_results(angles_plot_list, roe_data_log, perturbation_setting, drag_model_setting, separation_plane_setting)
 end
 
-function find_successful_maneuver(
+function find_j2_invariant_maneuver(
     perturbation_setting::PerturbationType,
     separation_plane_setting::SeparationPlane
 )
     drag_model_setting = DENSITY_MODEL_FREE
-    println("\n\n--- 目標ベースの分離方向探索を開始します ---")
-    println("Pert: $perturbation_setting, Plane: $separation_plane_setting, Target Acq. Time: $TARGET_ACQUISITION_DAYS days")
+    println("\n\n--- J2不変条件を満たす分離マヌーバの探索を開始します ---")
+    println("Pert: $perturbation_setting, Plane: $separation_plane_setting, Propagation: $PROPAGATION_ORBITS orbits")
     
-    include_j2_active=(perturbation_setting == J2_ONLY || perturbation_setting == J2_AND_DRAG)
-    include_drag_active_stm = (drag_model_setting == DENSITY_MODEL_FREE)
+    include_j2_active = (perturbation_setting == J2_ONLY || perturbation_setting == J2_AND_DRAG)
+    include_drag_active_stm = (perturbation_setting == DRAG_ONLY || perturbation_setting == J2_AND_DRAG)
     
-    oe_chief_initial_for_sv = OrbitalElementsClassical(a_c_stm_init, e_c_stm_init, i_c_stm_init, Omega_c_stm_init, omega_c_stm_init, 0.0, 0.0, M_c_stm_init)
+    oe_chief_initial_for_sv = OrbitalElementsClassical(a_c_stm_init,e_c_stm_init,i_c_stm_init,Omega_c_stm_init,omega_c_stm_init,0.0,0.0,M_c_stm_init)
     posvel_chief_initial_eci_vec = orbital_elements_to_sv(oe_chief_initial_for_sv)
     r_chief_init_eci=SVector{3}(posvel_chief_initial_eci_vec[1:3]); v_chief_init_eci=SVector{3}(posvel_chief_initial_eci_vec[4:6])
     oe_chief_eval = sv_to_orbital_elements(CartesianStateECI(r_chief_init_eci, v_chief_init_eci))
-
-    successful_angles = Float64[]
+    
+    optimal_cost = Inf
+    optimal_params = (angle=0.0, dv_mag=0.0)
+    
+    # ★★★ 修正: 全てのキーを辞書に含める ★★★
+    roe_data_log=Dict(
+        :initial_delta_a=>Float64[], :initial_delta_lambda=>Float64[], :initial_delta_ex=>Float64[], 
+        :initial_delta_ey=>Float64[], :initial_delta_ix=>Float64[], :initial_delta_iy=>Float64[],
+        :final_delta_a=>Float64[], :final_delta_lambda=>Float64[], :final_delta_ex=>Float64[], 
+        :final_delta_ey=>Float64[], :final_delta_ix=>Float64[], :final_delta_iy=>Float64[],
+        :cost=>Float64[], :t_final=>Float64[],
+        :initial_rel_j2_r=>Float64[], :initial_rel_j2_t=>Float64[], :initial_rel_j2_n=>Float64[], 
+        :initial_rel_j2_norm=>Float64[],
+        :final_rel_j2_r=>Float64[], :final_rel_j2_t=>Float64[], :final_rel_j2_n=>Float64[], 
+        :final_rel_j2_norm=>Float64[],
+        :error_eq1=>Float64[], :error_eq2=>Float64[] # 新しい誤差も追加
+    )
     angles_plot_list=Float64[]
 
-    t_acq_sec = TARGET_ACQUISITION_DAYS * 24 * 3600.0
-    required_initial_delta_a = -delta_a_dot_drag_initial_normalized * t_acq_sec
-    println("目標形成時間 $(TARGET_ACQUISITION_DAYS)日 を達成するために必要な初期 a*δa は $(required_initial_delta_a * oe_chief_eval.a) m です。")
+    tf_val = PROPAGATION_ORBITS * 2.0 * pi * sqrt(oe_chief_eval.a^3 / mu_earth)
+    println("伝播時間: $tf_val 秒 ($(PROPAGATION_ORBITS)軌道周期)")
 
-    angle_step_val=1.0 # より細かく探索
-    for angle_val in 0.0:angle_step_val:(360.0-angle_step_val)
-        push!(angles_plot_list, angle_val)
-        angle_rad_val = deg2rad(angle_val)
+    # 分離速度の大きさを探索
+    for dv_mag in 0.001:0.001:0.05
+        # 分離方向を探索
+        for angle_val in 0.0:10.0:350.0
+            
+            # 最初のdv_magループでのみ角度リストを作成
+            if dv_mag == 0.001 
+                push!(angles_plot_list, angle_val)
+            end
 
-        # 必要なΔvTとΔvRを計算
-        required_delta_v_T = (required_initial_delta_a * oe_chief_eval.n * oe_chief_eval.a) / 2.0
-        
-        # 0や180度に近い角度での発散を避ける
-        if abs(sin(angle_rad_val)) < 1e-6
-            continue
-        end
-        
-        delta_v_mag = required_delta_v_T / sin(angle_rad_val)
-        dv_R_val_comp = delta_v_mag * cos(angle_rad_val)
-        dv_T_val_comp = delta_v_mag * sin(angle_rad_val)
-        
-        # 分離速度が大きすぎる場合はスキップ (現実的な制約)
-        if abs(delta_v_mag) > 0.1 # 例: 0.1 m/s を上限とする
-            continue
-        end
+            angle_rad_val = deg2rad(angle_val)
+            dv_R_val_comp=dv_mag*cos(angle_rad_val); dv_T_val_comp=dv_mag*sin(angle_rad_val)
+            dv_lvlh_vec = SVector(dv_R_val_comp, dv_T_val_comp, 0.0)
 
-        dv_lvlh_vec = SVector(dv_R_val_comp, dv_T_val_comp, 0.0)
-        
-        state_deputy_init_eci=cw_to_eci_deputy_state(r_chief_init_eci,v_chief_init_eci,dr_lvlh_init,dv_lvlh_vec)
-        oe_dep_init = sv_to_orbital_elements(CartesianStateECI(state_deputy_init_eci.r_vec, state_deputy_init_eci.v_vec))
-        qns_roes_init=orbital_elements_to_qns_roe_koenig(oe_chief_eval,oe_dep_init)
-        
-        roe_aug_init_vec_temp=MVector{7,Float64}(qns_roes_init.delta_a_norm,qns_roes_init.delta_lambda,qns_roes_init.delta_ex,qns_roes_init.delta_ey,qns_roes_init.delta_ix,qns_roes_init.delta_iy,delta_a_dot_drag_initial_normalized)
-        roe_aug_init_vec=SVector(roe_aug_init_vec_temp)
-        
-        tf_val = t_acq_sec
-        
-        omega_c_ti=oe_chief_eval.omega
-        omega_dot_j2,Omega_dot_j2=include_j2_active ? get_secular_j2_rates_koenig(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i) : (0.0,0.0)
-        oe_chief_at_tf=OrbitalElementsClassical(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i,mod(oe_chief_eval.RAAN+Omega_dot_j2*tf_val,2*pi),mod(oe_chief_eval.omega+omega_dot_j2*tf_val,2*pi),0.0,oe_chief_eval.n,mod(oe_chief_eval.M+oe_chief_eval.n*tf_val,2*pi))
-        oe_chief_at_tf=OrbitalElementsClassical(oe_chief_at_tf.a,oe_chief_at_tf.e,oe_chief_at_tf.i,oe_chief_at_tf.RAAN,oe_chief_at_tf.omega,SatelliteToolbox.mean_to_true_anomaly(oe_chief_at_tf.e,oe_chief_at_tf.M),oe_chief_at_tf.n,oe_chief_at_tf.M)
-        
-        omega_c_tf_val=oe_chief_at_tf.omega
-        J_ti=get_J_qns_augmented_koenig(omega_c_ti); J_tf_inv=get_J_qns_inv_augmented_koenig(omega_c_tf_val)
-        roe_prime_init=J_ti*roe_aug_init_vec
-        A_kep_p, A_j2_p, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i,omega_c_ti,include_j2_active,include_drag_active_stm,drag_model_setting)
-        STM_prime=get_STM_prime_qns_augmented_koenig_model_selectable(A_kep_p,A_j2_p,A_drag_p,tf_val,oe_chief_eval.e,include_drag_active_stm,drag_model_setting)
-        roe_prime_final=STM_prime*roe_prime_init
-        roe_aug_final_vec=J_tf_inv*roe_prime_final
-        
-        final_a_da = oe_chief_eval.a * roe_aug_final_vec[1]
-        final_a_dl = oe_chief_eval.a * roe_aug_final_vec[2]
-        final_a_de_norm = oe_chief_eval.a * sqrt(roe_aug_final_vec[3]^2 + roe_aug_final_vec[4]^2)
-        final_a_di_norm = oe_chief_eval.a * sqrt(roe_aug_final_vec[5]^2 + roe_aug_final_vec[6]^2)
-        
-        is_success_da = abs(final_a_da) < 1e-3 # 理論上0になるはずだが数値誤差を許容
-        is_success_dl = abs(final_a_dl) < TARGET_a_delta_lambda_max
-        is_success_de = final_a_de_norm < TARGET_a_delta_e_norm_max
-        is_success_di = final_a_di_norm < TARGET_a_delta_i_norm_max
+            # --- 順伝播シミュレーション ---
+            state_deputy_init_eci=cw_to_eci_deputy_state(r_chief_init_eci,v_chief_init_eci,dr_lvlh_init,dv_lvlh_vec)
+            oe_dep_init = sv_to_orbital_elements(CartesianStateECI(state_deputy_init_eci.r_vec, state_deputy_init_eci.v_vec))
+            qns_roes_init=orbital_elements_to_qns_roe_koenig(oe_chief_eval,oe_dep_init)
+            
+            # ★★★ 修正: データをログに記録する (プロットのため) ★★★
+            if dv_mag == 0.005 # 代表的なdv_magの値のときだけプロット用に記録
+                push!(roe_data_log[:initial_delta_a],qns_roes_init.delta_a_norm); push!(roe_data_log[:initial_delta_lambda],rad2deg(qns_roes_init.delta_lambda)); push!(roe_data_log[:initial_delta_ex],qns_roes_init.delta_ex); push!(roe_data_log[:initial_delta_ey],qns_roes_init.delta_ey); push!(roe_data_log[:initial_delta_ix],rad2deg(qns_roes_init.delta_ix)); push!(roe_data_log[:initial_delta_iy],rad2deg(qns_roes_init.delta_iy))
+            end
 
-        if is_success_da && is_success_dl && is_success_de && is_success_di
-            push!(successful_angles, angle_val)
+            roe_aug_init_vec=SVector(qns_roes_init.delta_a_norm, qns_roes_init.delta_lambda, qns_roes_init.delta_ex, qns_roes_init.delta_ey, qns_roes_init.delta_ix, qns_roes_init.delta_iy, delta_a_dot_drag_initial_normalized)
+            
+            omega_c_ti=oe_chief_eval.omega; omega_dot_j2,Omega_dot_j2=get_secular_j2_rates_koenig(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i)
+            oe_chief_at_tf=OrbitalElementsClassical(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i,mod(oe_chief_eval.RAAN+Omega_dot_j2*tf_val,2*pi),mod(oe_chief_eval.omega+omega_dot_j2*tf_val,2*pi),0.0,oe_chief_eval.n,mod(oe_chief_eval.M+oe_chief_eval.n*tf_val,2*pi))
+            oe_chief_at_tf=OrbitalElementsClassical(oe_chief_at_tf.a,oe_chief_at_tf.e,oe_chief_at_tf.i,oe_chief_at_tf.RAAN,oe_chief_at_tf.omega,SatelliteToolbox.mean_to_true_anomaly(oe_chief_at_tf.e,oe_chief_at_tf.M),oe_chief_at_tf.n,oe_chief_at_tf.M)
+            
+            omega_c_tf_val=oe_chief_at_tf.omega; J_ti=get_J_qns_augmented_koenig(omega_c_ti); J_tf_inv=get_J_qns_inv_augmented_koenig(omega_c_tf_val); roe_prime_init=J_ti*roe_aug_init_vec
+            A_kep_p, A_j2_p, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i,omega_c_ti,include_j2_active,include_drag_active_stm,drag_model_setting)
+            STM_prime=get_STM_prime_qns_augmented_koenig_model_selectable(A_kep_p,A_j2_p,A_drag_p,tf_val,oe_chief_eval.e,include_drag_active_stm,drag_model_setting)
+            roe_prime_final=STM_prime*roe_prime_init; roe_aug_final_vec=J_tf_inv*roe_prime_final
+            
+            # --- コスト関数（J2不変条件からのずれ）を計算 ---
+            ac, ec, ic = oe_chief_at_tf.a, oe_chief_at_tf.e, oe_chief_at_tf.i
+            final_δa_norm, _, final_δex, _, final_δix, _ = roe_aug_final_vec
+
+            # 式(1.1)の評価
+            eta_c = sqrt(1-ec^2)
+            delta_e_approx = final_δex 
+            delta_eta_approx = (-ec / eta_c) * delta_e_approx
+            C11 = (2*J2_coeff*R_E^2)/(4*ac^2*eta_c^5) * (4+3*eta_c) * (1+5*cos(ic)^2)
+            target_delta_a_norm = C11 * delta_eta_approx
+            actual_delta_a_norm = final_δa_norm
+            error_1 = actual_delta_a_norm - target_delta_a_norm
+            cost_1 = error_1^2
+
+            # 式(1.2)の評価
+            C12 = (1-ec^2)*tan(ic)/(4*ec)
+            target_delta_e_approx = C12 * final_δix
+            actual_delta_e_approx = final_δex
+            error_2 = actual_delta_e_approx - target_delta_e_approx
+            cost_2 = error_2^2
+
+            # ★★★ 修正: 誤差の値をログに記録 ★★★
+            if dv_mag == 0.005 # 代表的なdv_magの値のときだけ誤差をプロット用に記録
+                push!(roe_data_log[:error_eq1], error_1)
+                push!(roe_data_log[:error_eq2], error_2)
+            end
+            
+            total_cost = cost_1 + cost_2 
+
+            if total_cost < optimal_cost
+                optimal_cost = total_cost
+                optimal_params = (angle=angle_val, dv_mag=dv_mag)
+            end
         end
     end
-    println("ループ終了")
+    println("探索ループ終了")
     
-    println("\n--- 結果 (Pert: $perturbation_setting, DragModel: $drag_model_setting, Plane: $separation_plane_setting) ---")
-    if isempty(successful_angles)
-        println("ターゲットボックスを満たす分離方向は見つかりませんでした。")
-    else
-        println("成功した分離方向の範囲: ", successful_angles)
-    end
+    println("\n--- 結果 ---")
+    println("J2不変条件を最もよく満たす最適な分離マヌーバ:")
+    @printf "  分離方向: %.1f deg\n" optimal_params.angle
+    @printf "  分離速度: %.4f m/s\n" optimal_params.dv_mag
+    @printf "  最小コスト（J2不変条件からの誤差の2乗和）: %.3e\n" optimal_cost
     
-    # plot_results(...)
+    # プロット関数を呼び出す
+    plot_results(angles_plot_list, roe_data_log, perturbation_setting, drag_model_setting, separation_plane_setting)
 end
 
 # --- 実行 ---
@@ -1331,15 +1387,17 @@ function run_all_cases()
     main_simulation(J2_AND_DRAG, DENSITY_MODEL_FREE, RT_PLANE)
 end
 
-run_all_cases()
-run_state_reconstruction_test()
-debug_stm_propagation_long_term()
-debug_with_inclination()
-debug_stm_components()
-debug_reconstruction_with_propagator()
-debug_j2_stm_methods()
-debug_j2_perturbation_field()
 function run_target_search()
-    find_successful_maneuver(J2_AND_DRAG, RT_PLANE)
+    find_j2_invariant_maneuver(J2_AND_DRAG, RT_PLANE)
 end
+
+run_all_cases()
+# run_state_reconstruction_test()
+# debug_stm_propagation_long_term()
+# debug_with_inclination()
+# debug_stm_components()
+# debug_reconstruction_with_propagator()
+# debug_j2_stm_methods()
+# debug_j2_perturbation_field()
+
 run_target_search()
