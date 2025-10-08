@@ -1,42 +1,55 @@
 # ==============================================================================
-# [ J2摂動と差動抗力を考慮した目標相対軌道形成のための最適分離マヌーバ探索 ]
+# [ 衛星の分離前回転を利用した無推薬編隊飛行の統合設計・解析コード ]
 #
 # ## 目的 (Main Purpose)
 #
-# このプログラムは、低軌道環境で支配的なJ2摂動と差動抗力の影響下で、
-# あらかじめ設計された**「目標とする相対軌道」**を形成するための、最適な初期分離マヌーバ
-# （分離方向と分離速度）を探索することを目的とする。
+# このプログラムは、低軌道環境におけるJ2摂動と差動抗力の影響下で、
+# 目標とする相対軌道（編隊）を**無推薬（スラスタレス）**で構築するための設計手法を確立することを目的とする。
 #
-# スラスタ（燃料）を消費しない差動抗力を利用して軌道エネルギー差を解消しつつ、
-# J2摂動による長期的な軌道のずれも考慮に入れ、最終的に目標の編隊形状に
-# 最も近づけるような、バランスの取れた解を見つけ出す。
+# 分離メカニズムとして、より現実的な**衛星の分離前回転**を仮定し、分離マヌーバのパラメータ（分離速度`Δv`、
+# 分離方向`θ`）を、衛星の姿勢運動のパラメータ（角速度`ω`、回転位相`φ`）に直接結びつける。
+# なお、本コードでの分離マヌーバは、軌道面に垂直な成分を持たない**軌道面内分離**に限定してモデル化している。
 #
-# ## コードの流れ (Workflow)
+# 本コードは、最終的な編隊の精度、短中期的な衝突回避の安全性、そして燃料消費に相当する
+# 分離速度`Δv`の最小化という、複数の相反する要求を同時に満たす、包括的な最適設計解
+# （最適な`Δv`, `θ`, および分離を行う最適な軌道位相`M`）を導出するためのツール群を提供する。
 #
-# 1.  **初期条件と目標ROEの定義:**
-#     - 主衛星の初期軌道要素や、差動抗力の効果をモデル化するパラメータを設定する。
-#     - ミッションで要求される物理的な制約（例：相対軌道の大きさ、許容される最大軌道面外ずれ）
-#       に基づき、最終的に目指すべき**理想的な7次元の相対軌道要素ベクトル（目標ROE）**を設計する。
+# ## 主要な手法と参考文献 (Key Methodologies / References)
 #
-# 2.  **分離マヌーバの全パターン探索:**
-#     - 分離速度の大きさと、軌道面内での分離方向（0°～360°）を変化させながら、
-#       二重のループ処理で全ての組み合わせを網羅的にテストする。
+# 本コードの中核をなす軌道伝播計算は、以下の論文で提案された状態遷移マトリックス（STM）に基づいている。
+# このSTMは、J2摂動と差動抗力を含む、近円軌道における相対運動を高精度かつ高速に予測するものである。
 #
-# 3.  **最終ROEの順伝播予測:**
-#     - 各分離マヌーバに対して、まず初期の相対軌道要素（ROE）を計算する。
-#     - Koenigらの論文に基づく状態遷移マトリックス（STM）を用いて、一定時間後
-#       （例: 10軌道周期後）の**最終的なROE**を高速に予測計算する。
+# - **参考文献:** A. W. Koenig, T. Guffanti, and S. D'Amico, "New State Transition Matrices for
+#   Spacecraft Relative Motion in Perturbed Orbits," Journal of Guidance, Control, and
+#   Dynamics, Vol. 40, No. 5, 2017, pp. 1749-1768.
+#   (https://arc.aiaa.org/doi/10.2514/1.G002409)
 #
-# 4.  **コスト計算と最適解の探索:**
-#     - 予測された最終ROEが、ステップ1で設計した「目標ROE」からどれだけずれているかを、
-#       **「重み付きの誤差二乗和」**としてコストを計算する。
-#       （例：軌道エネルギーの誤差は厳しく、位相の誤差は許容するなど重みで調整可能）
-#     - 全ての分離マヌーバの中で、このコストが最小となるものを「最適解」として記録する。
+# ## コードの機能と流れ (Functions and Workflow)
 #
-# 5.  **結果の可視化と保存:**
-#     - 探索終了後、見つかった最適な分離方向と分離速度をコンソールに出力する。
-#     - コストが分離条件（方向、速度）によってどう変化するかの全体像を3Dサーフェスプロットで
-#       可視化し、HTMLレポートとして保存する。
+# 本プログラムは、以下の3つの主要な実行関数を提供する。
+#
+# ### 1. `run_target_search()` - 2次元最適マヌーバ探索
+#
+# - **機能:** 分離を行う軌道位相`M`を固定した上で、目標ROEとの誤差を最小化する
+#   最適な分離マヌーバ（`Δv`, `θ`）を探索する。
+# - **流れ:** 各マヌーバ候補に対し、上記の**参考文献に基づく状態遷移マトリックス（STM）**を用いて
+#   最終的なROEを高速に予測する。予測された最終ROEと目標ROEとの差を、各要素の重要度に応じて
+#   ペナルティを課す**「重み付き誤差二乗和」**としてコストを計算し、このコストが最小となる解を探索する。
+#
+# ### 2. `run_reachable_set_analysis()` - 設計限界とトレードオフの可視化
+#
+# - **機能:** `Δv`や`M`といった特定のパラメータを固定し、分離方向`θ`を0°～360°まで変化させた場合に、
+#   物理的に到達可能な最終ROEの全集合（Reachable Set）を計算し、プロットする。
+# - **用途:** 提案手法で形成可能な編隊の**物理的な限界（デザインスペース）**を可視化する。
+#   軌道面内の形状（δex, δey）と面外のずれ（δiy）の間に存在する**トレードオフ関係**を解明する。
+#
+# ### 3. `run_global_optimization()` - 3次元包括的最適化
+#
+# - **機能:** `Δv`, `θ`, `M`の3変数を同時に変化させ、**衝突回避**や**最大`Δv`**といった
+#   物理的な制約条件を満たす解の中から、最終的な編隊精度（コスト）が最も高い（低い）解を、
+#   3次元のグリッドサーチにより探索する。
+# - **用途:** 本研究の最終的な結論である、**「全ての制約を満たす、最も効率的な
+#   包括的最適設計解（最適な`Δv`, `θ`, `M`）」**を導出する。
 #
 # ==============================================================================
 using LinearAlgebra
@@ -48,7 +61,7 @@ using Dates
 using Statistics
 using SatelliteToolbox
 
-# ★★★ インタラクティブなバックエンドを指定 ★★★
+# インタラクティブなバックエンドを指定
 # gr() # GRバックエンドを使用する場合
 plotlyjs() # PlotlyJSバックエンドを使用する場合
 
@@ -63,13 +76,13 @@ e_c_stm_init = 0.0022
 i_c_stm_init = deg2rad(97.65)
 Omega_c_stm_init = deg2rad(0.0)
 omega_c_stm_init = deg2rad(0.0)
-M_c_stm_init = deg2rad(0.0)
+M_c_stm_init = deg2rad(270.0)
 
 # --- 編隊飛行関連パラメータ ---
 const dr_lvlh_init = SVector(0.0, 0.0, 0.0)
 const delta_a_dot_drag = -4.6e-11 # [1/s]
 
-const PROPAGATION_ORBITS = 20.0 # 評価を行う軌道周期数
+const PROPAGATION_ORBITS = 10.0 # 評価を行う軌道周期数
 
 # --- 目標軌道パラメータ ---
 const TARGET_a_delta_e_norm = 500.0 # [m] (0.5km x 1km 楕円の短軸半径)
@@ -738,7 +751,7 @@ function run_reachable_set_analysis()
 
     # 3. 目標ROEベクトルを定義
     TARGET_a_delta_e_norm = 500.0
-    TARGET_Z_MAX_METERS = 10.0
+    TARGET_Z_MAX_METERS = 2.5
     roe_target_vec = SVector{7,Float64}(0.0, 0.0,
         TARGET_a_delta_e_norm / a_c_stm_init, 0.0,
         0.0, TARGET_Z_MAX_METERS / a_c_stm_init, 0.0)
@@ -904,7 +917,169 @@ function debug_single_angle(angle_deg::Float64, dv_mag::Float64)
     println("\n" * "="^50, "\nデバッグ実行完了。", "\n", "="^50)
 end
 
-# --- 実行 ---
+# ------------------------------------------------------------------------------
+# 1. 目的関数
+# ------------------------------------------------------------------------------
+function objective_function(params::Vector{Float64}, target_roe_vec::SVector{7,Float64}, W::Diagonal)
+    dv_mag, theta_deg, M_deg = params[1], params[2], params[3]
+    
+    try
+        # 主衛星の初期・最終状態を計算
+        M_rad = deg2rad(M_deg)
+        oe_chief_initial_for_sv = OrbitalElementsClassical(a_c_stm_init, e_c_stm_init, i_c_stm_init, Omega_c_stm_init, omega_c_stm_init, 0.0, 0.0, M_rad)
+        posvel_chief_initial_eci_vec = orbital_elements_to_sv(oe_chief_initial_for_sv)
+        r_chief_init_eci = SVector{3}(posvel_chief_initial_eci_vec[1:3]); v_chief_init_eci = SVector{3}(posvel_chief_initial_eci_vec[4:6])
+        oe_chief_eval = sv_to_orbital_elements(CartesianStateECI(r_chief_init_eci, v_chief_init_eci))
+        tf_val = PROPAGATION_ORBITS * 2.0 * pi * sqrt(oe_chief_eval.a^3 / mu_earth)
+        omega_dot_j2, Omega_dot_j2 = get_secular_j2_rates_koenig(oe_chief_eval.a, oe_chief_eval.e, oe_chief_eval.i)
+        oe_chief_at_tf = OrbitalElementsClassical(oe_chief_eval.a, oe_chief_eval.e, oe_chief_eval.i, 
+                                                mod(oe_chief_eval.RAAN + Omega_dot_j2 * tf_val, 2*pi), 
+                                                mod(oe_chief_eval.omega + omega_dot_j2 * tf_val, 2*pi), 
+                                                0.0, oe_chief_eval.n, mod(oe_chief_eval.M + oe_chief_eval.n * tf_val, 2*pi))
+
+        # STMを計算
+        omega_c_ti = oe_chief_eval.omega; omega_c_tf_val = oe_chief_at_tf.omega
+        J_ti = get_J_qns_augmented_koenig(omega_c_ti); J_tf_inv = get_J_qns_inv_augmented_koenig(omega_c_tf_val)
+        A_kep_p, A_j2_p, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(oe_chief_eval.a, oe_chief_eval.e, oe_chief_eval.i, omega_c_ti, true, true, DENSITY_MODEL_FREE)
+        STM_prime = get_STM_prime_qns_augmented_koenig_model_selectable(A_kep_p, A_j2_p, A_drag_p, tf_val, oe_chief_eval.e, true, DENSITY_MODEL_FREE)
+
+        # 副衛星の初期ROEを計算
+        theta_rad = deg2rad(theta_deg)
+        dv_R = dv_mag * cos(theta_rad); dv_T = dv_mag * sin(theta_rad)
+        dv_lvlh_vec = SVector(dv_R, dv_T, 0.0); dr_lvlh_init = SVector(0.0, 0.0, 0.0)
+        state_deputy_init_eci = cw_to_eci_deputy_state(r_chief_init_eci, v_chief_init_eci, dr_lvlh_init, dv_lvlh_vec)
+        oe_dep_init = sv_to_orbital_elements(state_deputy_init_eci)
+        qns_roes_init = orbital_elements_to_qns_roe_koenig(oe_chief_eval, oe_dep_init)
+        roe_aug_init_vec = SVector(qns_roes_init.delta_a_norm, qns_roes_init.delta_lambda, qns_roes_init.delta_ex, qns_roes_init.delta_ey, qns_roes_init.delta_ix, qns_roes_init.delta_iy, delta_a_dot_drag)
+
+        # 最終ROEを伝播計算
+        roe_prime_init = J_ti * roe_aug_init_vec
+        roe_prime_final = STM_prime * roe_prime_init
+        roe_aug_final_vec = J_tf_inv * roe_prime_final
+
+        # コストを計算
+        error_vec = SVector{7,Float64}(roe_aug_final_vec[1:7]) - target_roe_vec
+        cost = dot(error_vec, W * error_vec)
+
+        return isnan(cost) ? Inf : cost
+    catch e
+        return Inf
+    end
+end
+
+# ------------------------------------------------------------------------------
+# 2. 制約関数
+# ------------------------------------------------------------------------------
+function constraint_function(params::Vector{Float64})
+    # --- 0. 入力とグローバル変数の準備 ---
+    dv_mag, theta_deg, M_deg = params[1], params[2], params[3]
+    
+    SAFE_DISTANCE_METERS = 1000.0
+    MAX_DV_MAG_MPS = 3.14
+
+    try
+        # --- 1. Δvの上限制約をチェック ---
+        if dv_mag > MAX_DV_MAG_MPS
+            return false
+        end
+
+        # --- 2. 衝突回避制約のチェック ---
+        M_rad = deg2rad(M_deg)
+        oe_chief_initial_for_sv = OrbitalElementsClassical(a_c_stm_init, e_c_stm_init, i_c_stm_init, Omega_c_stm_init, omega_c_stm_init, 0.0, 0.0, M_rad)
+        
+        sv_chief_init_vec = orbital_elements_to_sv(oe_chief_initial_for_sv)
+        r_chief_init_eci = SVector{3}(sv_chief_init_vec[1:3])
+        v_chief_init_eci = SVector{3}(sv_chief_init_vec[4:6])
+
+        theta_rad = deg2rad(theta_deg)
+        dv_R = dv_mag * cos(theta_rad); dv_T = dv_mag * sin(theta_rad)
+        dv_lvlh_vec = SVector(dv_R, dv_T, 0.0); dr_lvlh_init = SVector(0.0, 0.0, 0.0)
+        state_deputy_init_eci = cw_to_eci_deputy_state(r_chief_init_eci, v_chief_init_eci, dr_lvlh_init, dv_lvlh_vec)
+        
+        sv_chief_init_struct = OrbitStateVector(0.0, r_chief_init_eci, v_chief_init_eci)
+        sv_deputy_init_struct = OrbitStateVector(0.0, state_deputy_init_eci.r_vec, state_deputy_init_eci.v_vec)
+
+        T_orbit = 2.0 * pi * sqrt(a_c_stm_init^3 / mu_earth)
+               
+        # --- 主衛星の伝播 (J2モデル) ---
+        kep_chief_init = sv_to_kepler(sv_chief_init_struct)
+        j2d_chief = j2_init(kep_chief_init)
+        r_chief_1_orbit, v_chief_1_orbit = j2!(j2d_chief, T_orbit)
+
+        # --- 副衛星の伝播 (J2モデル) ---
+        kep_deputy_init = sv_to_kepler(sv_deputy_init_struct)
+        j2d_deputy = j2_init(kep_deputy_init)
+        r_deputy_1_orbit, v_deputy_1_orbit = j2!(j2d_deputy, T_orbit)
+        # ★★★【ここまで】★★★
+
+        distance_at_1_orbit = norm(r_deputy_1_orbit - r_chief_1_orbit)
+        is_collision_safe = distance_at_1_orbit > SAFE_DISTANCE_METERS
+        return is_collision_safe
+
+    catch e
+        # 予期せぬエラーを捕捉
+        # @printf "  [予期せぬエラー] Δv=%.3f, θ=%.1f, M=%.1f: %s\n" dv_mag theta_deg M_deg e
+        return false
+    end
+end
+
+# ------------------------------------------------------------------------------
+# 3. 3Dグリッドサーチ実行関数
+# ------------------------------------------------------------------------------
+function run_global_optimization()
+    dv_range = 0.01:0.01:3.14
+    theta_range = 0:20:340
+    M_range = 0:30:330
+
+    TARGET_a_delta_e_norm = 500.0
+    TARGET_Z_MAX_METERS = 10.0
+    target_roe_vec = SVector{7,Float64}(0.0, 0.0,
+        TARGET_a_delta_e_norm / a_c_stm_init, 0.0,
+        0.0, TARGET_Z_MAX_METERS / a_c_stm_init, 0.0)
+    
+    W = Diagonal(SVector{7,Float64}(1.0e6, 1.0, 1000.0, 1000.0, 1000.0, 1000.0, 0.0))
+
+    min_cost = Inf
+    optimal_params = nothing
+    total_iterations = length(dv_range) * length(theta_range) * length(M_range)
+    println("総当たり計算を開始します... (合計: $(total_iterations) ケース)")
+    
+    # 計算進捗を表示するためのカウンター
+    counter = 0
+
+    for M in M_range
+        for dv in dv_range
+            for theta in theta_range
+                counter += 1
+                if counter % 100 == 0 # 100回ごとに進捗を表示
+                    @printf "  進捗: %d / %d (%.1f %%)\n" counter total_iterations (counter/total_iterations*100)
+                end
+
+                params = [dv, theta, M]
+                if constraint_function(params)
+                    cost = objective_function(params, target_roe_vec, W)
+                    if cost < min_cost
+                        min_cost = cost
+                        optimal_params = (dv=dv, theta=theta, M=M)
+                        @printf "新・最適解 Cost: %.3e, Δv: %.3f, θ: %.1f, M: %.1f \n" min_cost dv theta M
+                    end
+                end
+            end
+        end
+    end
+
+    println("\n最適化完了！")
+    if optimal_params !== nothing
+        println("最終的な最適解:")
+        println("  - 最小コスト: $(min_cost)")
+        println("  - 最適分離速度 (Δv): $(optimal_params.dv) m/s")
+        println("  - 最適分離方向 (θ): $(optimal_params.theta) deg")
+        println("  - 最適分離位相 (M): $(optimal_params.M) deg")
+    else
+        println("制約を満たす解が見つかりませんでした。")
+    end
+end
+
 function run_target_search()
     # 最適解の探索
     optimal_params, target_roe_vec = find_j2_invariant_maneuver(J2_AND_DRAG, RT_PLANE)
@@ -920,7 +1095,4 @@ run_target_search()
 
 run_reachable_set_analysis()
 
-# # 検証テストを実行
-# run_state_reconstruction_test()
-# debug_single_angle(120.0, 0.03)
-# debug_single_angle(130.0, 0.03) 
+run_global_optimization()
