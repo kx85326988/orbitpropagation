@@ -62,8 +62,8 @@ using Statistics
 using SatelliteToolbox
 
 # インタラクティブなバックエンドを指定
-# gr() # GRバックエンドを使用する場合
-plotlyjs() # PlotlyJSバックエンドを使用する場合
+gr() # GRバックエンドを使用する場合
+# plotlyjs() # PlotlyJSバックエンドを使用する場合
 
 # --- 物理定数 ---
 const mu_earth = 3.986004418e14
@@ -249,6 +249,17 @@ function eci_to_rtn(r_chief_eci::SVector{3,Float64}, v_chief_eci::SVector{3,Floa
     return dcm_eci_to_rtn * vec_eci
 end
 
+# 任意軸周りの回転行列を計算 (ロドリゲスの回転公式)
+function rotation_matrix_around_axis(axis::SVector{3,Float64}, angle_rad::Float64)
+    c = cos(angle_rad); s = sin(angle_rad); C = 1 - c
+    x, y, z = axis[1], axis[2], axis[3]
+    return @SMatrix [
+        x*x*C + c    x*y*C - z*s  x*z*C + y*s;
+        y*x*C + z*s  y*y*C + c    y*z*C - x*s;
+        z*x*C - y*s  z*y*C + x*s  z*z*C + c
+    ]
+end
+
 # ==============================================================================
 # [ 状態再構成プロセスの検証用テスト関数 ]
 # ==============================================================================
@@ -377,7 +388,7 @@ function find_j2_invariant_maneuver(perturbation_setting::PerturbationType, sepa
 
     # --- 目標とする物理的な軌道形状 ---
     TARGET_DELTA_E_NORM_METERS = 500.0 # [m] 相対軌道の短軸半径
-    TARGET_Z_MAX_METERS      = 10.0  # [m] 許容される最大軌道面外ずれ
+    TARGET_Z_MAX_METERS      = 1.0  # [m] 許容される最大軌道面外ずれ
 
     # --- 物理要求をROEターゲットに変換 ---
     roe_target_a_norm = 0.0
@@ -423,7 +434,7 @@ function find_j2_invariant_maneuver(perturbation_setting::PerturbationType, sepa
     
     cost_data = Float64[] # プロット用のコストデータを保存
 
-    for dv_mag in 0.001:0.001:0.05
+    for dv_mag in 0.01:0.01:0.5
         for angle_val in 0.0:10.0:350.0
             angle_rad_val = deg2rad(angle_val)
             dv_R_val_comp=dv_mag*cos(angle_rad_val); dv_T_val_comp=dv_mag*sin(angle_rad_val)
@@ -716,7 +727,7 @@ end
 # ==============================================================================
 function run_reachable_set_analysis()
     # 1. 可視化したい分離速度を設定
-    dv_to_visualize = 0.03 # [m/s]
+    dv_to_visualize = 0.09 # [m/s]
 
     # 2. 到達可能集合のデータを計算 (角度情報も含む)
     results_list = calculate_reachable_set_data(dv_to_visualize, PROPAGATION_ORBITS)
@@ -751,7 +762,7 @@ function run_reachable_set_analysis()
 
     # 3. 目標ROEベクトルを定義
     TARGET_a_delta_e_norm = 500.0
-    TARGET_Z_MAX_METERS = 2.5
+    TARGET_Z_MAX_METERS = 1.0
     roe_target_vec = SVector{7,Float64}(0.0, 0.0,
         TARGET_a_delta_e_norm / a_c_stm_init, 0.0,
         0.0, TARGET_Z_MAX_METERS / a_c_stm_init, 0.0)
@@ -944,9 +955,17 @@ function objective_function(params::Vector{Float64}, target_roe_vec::SVector{7,F
         STM_prime = get_STM_prime_qns_augmented_koenig_model_selectable(A_kep_p, A_j2_p, A_drag_p, tf_val, oe_chief_eval.e, true, DENSITY_MODEL_FREE)
 
         # 副衛星の初期ROEを計算
+        # (psi_deg を新しい引数として受け取る)
         theta_rad = deg2rad(theta_deg)
-        dv_R = dv_mag * cos(theta_rad); dv_T = dv_mag * sin(theta_rad)
-        dv_lvlh_vec = SVector(dv_R, dv_T, 0.0); dr_lvlh_init = SVector(0.0, 0.0, 0.0)
+        psi_rad = deg2rad(psi_deg)
+
+        # 球座標系からRTNベクトルへ変換
+        dv_T = dv_mag * cos(psi_rad) * cos(theta_rad)
+        dv_R = dv_mag * cos(psi_rad) * sin(theta_rad)
+        dv_N = dv_mag * sin(psi_rad)
+
+        dv_lvlh_vec = SVector(dv_R, dv_T, dv_N)
+        dr_lvlh_init = SVector(0.0, 0.0, 0.0)
         state_deputy_init_eci = cw_to_eci_deputy_state(r_chief_init_eci, v_chief_init_eci, dr_lvlh_init, dv_lvlh_vec)
         oe_dep_init = sv_to_orbital_elements(state_deputy_init_eci)
         qns_roes_init = orbital_elements_to_qns_roe_koenig(oe_chief_eval, oe_dep_init)
@@ -975,8 +994,8 @@ function constraint_function(params::Vector{Float64})
     dv_mag, theta_deg, M_deg = params[1], params[2], params[3]
     
     SAFE_DISTANCE_METERS = 1000.0
-    MAX_DV_MAG_MPS = 3.14
-
+    MAX_DV_MAG_MPS = 0.5
+    
     try
         # --- 1. Δvの上限制約をチェック ---
         if dv_mag > MAX_DV_MAG_MPS
@@ -991,9 +1010,17 @@ function constraint_function(params::Vector{Float64})
         r_chief_init_eci = SVector{3}(sv_chief_init_vec[1:3])
         v_chief_init_eci = SVector{3}(sv_chief_init_vec[4:6])
 
+        # (psi_deg を新しい引数として受け取る)
         theta_rad = deg2rad(theta_deg)
-        dv_R = dv_mag * cos(theta_rad); dv_T = dv_mag * sin(theta_rad)
-        dv_lvlh_vec = SVector(dv_R, dv_T, 0.0); dr_lvlh_init = SVector(0.0, 0.0, 0.0)
+        psi_rad = deg2rad(psi_deg)
+
+        # 球座標系からRTNベクトルへ変換
+        dv_T = dv_mag * cos(psi_rad) * cos(theta_rad)
+        dv_R = dv_mag * cos(psi_rad) * sin(theta_rad)
+        dv_N = dv_mag * sin(psi_rad)
+
+        dv_lvlh_vec = SVector(dv_R, dv_T, dv_N)
+        dr_lvlh_init = SVector(0.0, 0.0, 0.0)
         state_deputy_init_eci = cw_to_eci_deputy_state(r_chief_init_eci, v_chief_init_eci, dr_lvlh_init, dv_lvlh_vec)
         
         sv_chief_init_struct = OrbitStateVector(0.0, r_chief_init_eci, v_chief_init_eci)
@@ -1010,7 +1037,6 @@ function constraint_function(params::Vector{Float64})
         kep_deputy_init = sv_to_kepler(sv_deputy_init_struct)
         j2d_deputy = j2_init(kep_deputy_init)
         r_deputy_1_orbit, v_deputy_1_orbit = j2!(j2d_deputy, T_orbit)
-        # ★★★【ここまで】★★★
 
         distance_at_1_orbit = norm(r_deputy_1_orbit - r_chief_1_orbit)
         is_collision_safe = distance_at_1_orbit > SAFE_DISTANCE_METERS
@@ -1027,12 +1053,12 @@ end
 # 3. 3Dグリッドサーチ実行関数
 # ------------------------------------------------------------------------------
 function run_global_optimization()
-    dv_range = 0.01:0.01:3.14
-    theta_range = 0:20:340
-    M_range = 0:30:330
+    dv_range = 0.01:0.01:0.5
+    theta_range = 0:10:350
+    M_range = 0:10:350
 
     TARGET_a_delta_e_norm = 500.0
-    TARGET_Z_MAX_METERS = 10.0
+    TARGET_Z_MAX_METERS = 1.0
     target_roe_vec = SVector{7,Float64}(0.0, 0.0,
         TARGET_a_delta_e_norm / a_c_stm_init, 0.0,
         0.0, TARGET_Z_MAX_METERS / a_c_stm_init, 0.0)
@@ -1080,6 +1106,326 @@ function run_global_optimization()
     end
 end
 
+# ==============================================================================
+# [ 最終状態計算関数]
+# ==============================================================================
+function calculate_final_state(params::Vector{Float64})
+    # --- 0. 入力と準備 ---
+    # パラメータに「軸ブレの方向」を追加
+    dv_mag, theta_deg, psi_deg, phi_tilt_deg, M_deg = params[1], params[2], params[3], params[4], params[5]
+
+        try
+        # --- 1. 初期状態の計算 ---
+        M_rad = deg2rad(M_deg)
+        oe_chief_initial_for_sv = OrbitalElementsClassical(a_c_stm_init, e_c_stm_init, i_c_stm_init, Omega_c_stm_init, omega_c_stm_init, 0.0, 0.0, M_rad)
+        sv_chief_init_vec = orbital_elements_to_sv(oe_chief_initial_for_sv)
+        r_chief_init_eci = SVector{3}(sv_chief_init_vec[1:3]); v_chief_init_eci = SVector{3}(sv_chief_init_vec[4:6])
+        oe_chief_eval = sv_to_orbital_elements(CartesianStateECI(r_chief_init_eci, v_chief_init_eci))
+        
+        # ★★★【ここからが厳密な3D分離ベクトルの計算】★★★
+        theta_rad = deg2rad(theta_deg)         # 分離位相
+        psi_rad = deg2rad(psi_deg)             # 軸ブレの大きさ
+        phi_tilt_rad = deg2rad(phi_tilt_deg)   # 軸ブレの方向
+
+        # 1. 理想状態（ブレなし）の分離速度ベクトルをRT平面内に定義
+        #    (注意: ご自身のコードの R,T の定義に合わせて sin/cos を確認してください)
+        v_ideal = SVector(
+            dv_mag * sin(theta_rad), # R成分
+            dv_mag * cos(theta_rad), # T成分
+            0.0                      # N成分
+        )
+
+        # 2. 「軸ブレ」を表す回転を定義
+        #    ブレの方向(phi_tilt)に垂直な軸の周りで、ブレの大きさ(psi)だけ回転させる
+        rotation_axis = SVector(cos(phi_tilt_rad), -sin(phi_tilt_rad), 0.0)
+        R_tilt = rotation_matrix_around_axis(rotation_axis, psi_rad)
+
+        # 3. 理想ベクトルに回転を適用して、現実の分離速度ベクトルを計算
+        dv_lvlh_vec = R_tilt * v_ideal
+        dr_lvlh_init = SVector(0.0, 0.0, 0.0)
+        
+        state_deputy_init_eci = cw_to_eci_deputy_state(r_chief_init_eci, v_chief_init_eci, dr_lvlh_init, dv_lvlh_vec)
+        sv_deputy_init_struct = OrbitStateVector(0.0, state_deputy_init_eci.r_vec, state_deputy_init_eci.v_vec)
+        sv_chief_init_struct = OrbitStateVector(0.0, r_chief_init_eci, v_chief_init_eci)
+
+        # --- 2. 最終ROEの計算 (10周期後) ---
+        tf_val = PROPAGATION_ORBITS * 2.0 * pi * sqrt(oe_chief_eval.a^3 / mu_earth)
+        omega_dot_j2, Omega_dot_j2 = get_secular_j2_rates_koenig(oe_chief_eval.a, oe_chief_eval.e, oe_chief_eval.i)
+        oe_chief_at_tf = OrbitalElementsClassical(oe_chief_eval.a, oe_chief_eval.e, oe_chief_eval.i, mod(oe_chief_eval.RAAN + Omega_dot_j2 * tf_val, 2*pi), mod(oe_chief_eval.omega + omega_dot_j2 * tf_val, 2*pi), 0.0, oe_chief_eval.n, mod(oe_chief_eval.M + oe_chief_eval.n * tf_val, 2*pi))
+        omega_c_ti = oe_chief_eval.omega; omega_c_tf_val = oe_chief_at_tf.omega
+        J_ti = get_J_qns_augmented_koenig(omega_c_ti); J_tf_inv = get_J_qns_inv_augmented_koenig(omega_c_tf_val)
+        A_kep_p, A_j2_p, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(oe_chief_eval.a, oe_chief_eval.e, oe_chief_eval.i, omega_c_ti, true, true, DENSITY_MODEL_FREE)
+        STM_prime = get_STM_prime_qns_augmented_koenig_model_selectable(A_kep_p, A_j2_p, A_drag_p, tf_val, oe_chief_eval.e, true, DENSITY_MODEL_FREE)
+        oe_dep_init = sv_to_orbital_elements(state_deputy_init_eci)
+        qns_roes_init = orbital_elements_to_qns_roe_koenig(oe_chief_eval, oe_dep_init)
+        roe_aug_init_vec = SVector(qns_roes_init.delta_a_norm, qns_roes_init.delta_lambda, qns_roes_init.delta_ex, qns_roes_init.delta_ey, qns_roes_init.delta_ix, qns_roes_init.delta_iy, delta_a_dot_drag)
+        roe_prime_init = J_ti * roe_aug_init_vec
+        roe_prime_final = STM_prime * roe_prime_init
+        final_roe = J_tf_inv * roe_prime_final
+
+        # --- 3. 1周期後の距離の計算 ---
+        T_orbit = 2.0 * pi * sqrt(a_c_stm_init^3 / mu_earth)
+        
+        # ★★★【ここを修正】★★★
+        # j2.jl のAPIを正しく使用して軌道伝播を行う
+        kep_chief_init = sv_to_kepler(sv_chief_init_struct)
+        j2d_chief = j2_init(kep_chief_init)
+        r_chief_1_orbit, v_chief_1_orbit = j2!(j2d_chief, T_orbit)
+
+        kep_deputy_init = sv_to_kepler(sv_deputy_init_struct)
+        j2d_deputy = j2_init(kep_deputy_init)
+        r_deputy_1_orbit, v_deputy_1_orbit = j2!(j2d_deputy, T_orbit)
+        # ★★★【ここまで】★★★
+        
+        d_1orbit = norm(r_deputy_1_orbit - r_chief_1_orbit)
+
+        return final_roe, d_1orbit
+
+    catch e
+        # 予期せぬエラーを捕捉
+        # @printf "  [計算エラー発生] %s\n" e
+        return (SVector{7,Float64}(fill(NaN, 7)), NaN)
+    end
+end
+
+# ==============================================================================
+# [ 姿勢系要求分析の実行関数]
+# 最初の計算エラーを発見したら、その場で処理を中断
+# ==============================================================================
+function run_attitude_requirement_analysis()
+    # 探索範囲
+    dv_range = 0.01:0.01:0.2
+    theta_range = 0:20:340
+    psi_range = -30:5:30
+    phi_tilt_range = 0:22.5:315 # 軸ブレの方向 0=T軸、90=R軸、180=-T軸、270=-R軸
+    M_range = 0:30:330
+
+    results = []
+    total_iterations = length(dv_range) * length(theta_range) * length(psi_range) * length(M_range)
+    println("姿勢系要求分析のための大規模シミュレーションを開始します... (合計: $(total_iterations) ケース)")
+
+    for M in M_range, phi_tilt in phi_tilt_range, psi in psi_range, dv in dv_range, theta in theta_range
+        
+        params = [dv, theta, psi, phi_tilt, M]
+        
+        # 1. 最終状態を計算
+        final_roe, d_1orbit = calculate_final_state(params)
+
+        # ★★★【ここを修正】★★★
+        # 2. 計算が失敗したか(NaNが返されたか)をチェック
+        if isnan(final_roe[1])
+            # 3. 失敗していたら、メッセージを表示して即座に関数を終了する
+            println("\n最初の計算エラーが検出されたため、処理を中断します。")
+            println("上記のエラーメッセージが根本原因です。")
+            return [] # 空の結果を返して終了
+        end
+        # ★★★【ここまで】★★★
+
+        # 計算が成功した場合のみ結果を保存
+        push!(results, (params=params, final_roe=final_roe, d_1orbit=d_1orbit))
+    end
+    
+    println("シミュレーションが完了しました。")
+    return results
+end
+
+# ==============================================================================
+# [ 姿勢系要求分析の実行と結果表示を行う関数]
+# ==============================================================================
+function analyze_attitude_requirements()
+    
+    # --- 1. 全てのパラメータの組み合わせについてシミュレーションを実行 ---
+    println("姿勢系要求分析のための大規模シミュレーションを開始します...")
+    all_simulation_results = run_attitude_requirement_analysis()
+    println("シミュレーションが完了しました。")
+
+    if isempty(all_simulation_results)
+        println("シミュレーション結果が空です。処理を中断します。")
+        return
+    end
+
+    # --- 2. シミュレーション結果の中から「成功ケース」をフィルタリング ---
+    println("成功ケースをフィルタリング中...")
+    successful_cases = filter(
+        r -> abs(r.final_roe[6] * a_c_stm_init) <= 1.0 && r.d_1orbit > 100.0,
+        all_simulation_results
+    )
+
+    # --- 3. フィルタリング結果の集計と表示 ---
+    total_cases = length(all_simulation_results)
+    success_count = length(successful_cases)
+    
+    println("\n" * "="^50)
+    println("分析サマリー")
+    println("="^50)
+    @printf "総計算ケース数: %d\n" total_cases
+    @printf "要求達成ケース数: %d (成功率: %.2f %%)\n" success_count (success_count / total_cases * 100)
+
+    # --- 4. 成功ケースの簡単な分析と考察 ---
+    if success_count > 0
+        println("\n--- 成功ケースの詳細分析 ---")
+
+        min_dv_success = minimum(r.params[1] for r in successful_cases)
+        @printf "要求を達成した最小分離速度 (Δv_min): %.3f m/s\n" min_dv_success
+
+        max_psi_error_success = maximum(abs(r.params[3]) for r in successful_cases)
+        @printf "要求を達成した最大回転軸ブレ (ψ_max): %.1f deg\n" max_psi_error_success
+
+        # ★★★【ここを修正】★★★
+        # println を @printf に変更し、引数の間にカンマを追加
+        @printf("\nこの結果は、要求を達成するには最低でも %.3f m/s の分離速度が必要であり、その際の回転軸のブレは最大でも %.1f 度まで許容されることを示唆しています。\n", min_dv_success, max_psi_error_success)
+        # ★★★【ここまで】★★★
+    end
+    println("="^50)
+    
+    if success_count > 0
+        # plot_successful_distribution_3d(successful_cases)
+        create_analysis_plots(successful_cases)
+    end
+end
+
+# ==============================================================================
+# [ 成功ケースの分布を可視化する3D散布図関数 ]
+# ==============================================================================
+function plot_successful_distribution_3d(successful_cases)
+    
+    if isempty(successful_cases)
+        println("プロットする成功ケースがありません。")
+        return
+    end
+
+    println("成功ケースの3D分布プロットを作成中...")
+
+    # --- 1. プロット用データを準備 ---
+    # successful_casesから各パラメータの値を抽出
+    dv_vals    = [r.params[1] for r in successful_cases]
+    theta_vals = [r.params[2] for r in successful_cases]
+    psi_vals   = [r.params[3] for r in successful_cases]
+    M_vals     = [r.params[4] for r in successful_cases]
+
+    # --- 2. 3D散布図を作成 ---
+    # 注：このプロットはインタラクティブな plotlyjs() バックエンドで見るのが最適です
+    # ファイルの冒頭で gr() をコメントアウトし、plotlyjs() を有効にしてください。
+    p3d = scatter(
+        M_vals,
+        theta_vals,
+        psi_vals,
+        marker_z=dv_vals,    # 点の色をΔvの値で変化させる
+        xlabel="Orbital Phase M [deg]",
+        ylabel="Separation Angle θ [deg]",
+        zlabel="Axis Error ψ [deg]",
+        title="Distribution of Successful Maneuvers (N = $(length(successful_cases)))",
+        markersize=2,
+        markerstrokewidth=0,
+        label="",
+        color=:viridis,
+        colorbar_title="Separation Δv [m/s]"
+    )
+    
+    display(p3d)
+
+    # --- 3. プロットをHTMLとして保存 ---
+    # 3Dプロットはインタラクティブなので、HTMLで保存するのが最適
+    timestamp = Dates.format(now(), "yyyy-mm-dd_HH-MM-SS")
+    html_filename = "successful_distribution_$(timestamp).html"
+    savefig(p3d, html_filename)
+    println("3D分布プロットを保存しました: $(html_filename)")
+end
+
+# ==============================================================================
+# [ 成功ケースの分析グラフ作成関数（最終修正版）]
+# ==============================================================================
+function create_analysis_plots(successful_cases)
+    if isempty(successful_cases); println("プロットする成功ケースがありません。"); return; end
+    println("成功ケースの分析グラフを作成中...")
+    
+    # --- データの準備 ---
+    params_list = [r.params for r in successful_cases]
+    dv_vals    = [p[1] for p in params_list]; theta_vals = [p[2] for p in params_list]
+    psi_vals   = [p[3] for p in params_list]; phi_tilt_vals = [p[4] for p in params_list]
+    M_vals     = [p[5] for p in params_list]
+
+    # --- グラフA: 各傾き方向における、成功可能なΔvの範囲 ---
+    phi_tilt_unique = sort(unique(phi_tilt_vals))
+    # ★★★【修正】型を Float64 と明示的に指定 ★★★
+    min_dv_per_phi = Float64[]; max_dv_per_phi = Float64[]
+    for phi in phi_tilt_unique
+        dvs_for_this_phi = [dv_vals[i] for i in 1:length(phi_tilt_vals) if phi_tilt_vals[i] == phi]
+        if !isempty(dvs_for_this_phi)
+            push!(min_dv_per_phi, minimum(dvs_for_this_phi))
+            push!(max_dv_per_phi, maximum(dvs_for_this_phi))
+        end
+    end
+    
+    p_a = plot(phi_tilt_unique, min_dv_per_phi, fillrange = max_dv_per_phi, fillalpha = 0.3,
+        label="Success Range", xlabel="Axis Tilt Direction φ_tilt [deg]", ylabel="Allowed Δv [m/s]",
+        title="Δv Robustness to Tilt Direction", xticks=0:45:315)
+    plot!(p_a, phi_tilt_unique, min_dv_per_phi, seriestype=:line, marker=:circle, label="", color=:blue)
+    plot!(p_a, phi_tilt_unique, max_dv_per_phi, seriestype=:line, marker=:circle, label="", color=:blue)
+
+    # --- グラフB: 各傾きサイズにおける、成功可能なΔvの範囲 ---
+    psi_unique = sort(unique(psi_vals))
+    # ★★★【修正】型を Float64 と明示的に指定 ★★★
+    min_dv_per_psi = Float64[]; max_dv_per_psi = Float64[]
+    for psi in psi_unique
+        dvs_for_this_psi = [dv_vals[i] for i in 1:length(psi_vals) if psi_vals[i] == psi]
+        if !isempty(dvs_for_this_psi)
+            push!(min_dv_per_psi, minimum(dvs_for_this_psi))
+            push!(max_dv_per_psi, maximum(dvs_for_this_psi))
+        end
+    end
+
+    p_b = plot(psi_unique, min_dv_per_psi, fillrange = max_dv_per_psi, fillalpha = 0.3,
+        label="Success Range", xlabel="Allowed Axis Tilt ψ [deg]", ylabel="Allowed Δv [m/s]",
+        title="Trade-off: Attitude Error vs. Δv")
+    plot!(p_b, psi_unique, min_dv_per_psi, seriestype=:line, marker=:circle, label="", color=:blue)
+    plot!(p_b, psi_unique, max_dv_per_psi, seriestype=:line, marker=:circle, label="", color=:blue)
+
+    # --- グラフD: 最もロバストな設計点(M, θ)の探索 ---
+    # ★★★【修正】Dictと配列の型を明示的に指定 ★★★
+    robustness_map = Dict{Tuple{Float64, Float64}, Vector{Float64}}()
+    for i in 1:length(M_vals)
+        key = (M_vals[i], theta_vals[i])
+        if !haskey(robustness_map, key)
+            robustness_map[key] = Float64[]
+        end
+        push!(robustness_map[key], dv_vals[i])
+    end
+
+    M_robust = Float64[]; theta_robust = Float64[]; dv_range_width = Float64[]
+    for (key, dvs) in robustness_map
+        push!(M_robust, key[1])
+        push!(theta_robust, key[2])
+        push!(dv_range_width, isempty(dvs) ? 0.0 : maximum(dvs) - minimum(dvs))
+    end
+
+    p_d = scatter(
+        M_robust, theta_robust, marker_z=dv_range_width,
+        xlabel="Orbital Phase M [deg]", ylabel="Separation Angle θ [deg]",
+        title="Most Robust Design Points (Widest Δv Range)",
+        markersize=4, markerstrokewidth=0, label="", color=:inferno,
+        colorbar_title="Δv Range Width [m/s]"
+    )
+    
+    # --- グラフC (変更なし) ---
+    p_c = scatter(
+        M_vals, theta_vals, marker_z=dv_vals, xlabel="Orbital Phase M [deg]",
+        ylabel="Separation Angle θ [deg]", title="Sweet Spot for Low-Δv Maneuvers",
+        markersize=4, markerstrokewidth=0, label="", color=:viridis, colorbar_title="Required Δv [m/s]")
+
+    # --- グラフの表示と保存 ---
+    timestamp = Dates.format(now(), "yyyy-mm-dd_HH-MM-SS")
+    final_plot = plot(p_a, p_b, p_c, p_d, layout=(2, 2), size=(1200, 1000))
+    display(final_plot)
+    
+    # 各グラフを個別のファイルとして保存
+    savefig(p_a, "plot_A_tilt_robustness_range_$(timestamp).png")
+    savefig(p_b, "plot_B_tradeoff_dv_psi_range_$(timestamp).png")
+    savefig(p_c, "plot_C_sweet_spot_min_dv_$(timestamp).png")
+    savefig(p_d, "plot_D_robust_design_points_$(timestamp).png")
+    println("4種類の分析グラフをPNGファイルとして保存しました。")
+end
+
 function run_target_search()
     # 最適解の探索
     optimal_params, target_roe_vec = find_j2_invariant_maneuver(J2_AND_DRAG, RT_PLANE)
@@ -1096,3 +1442,5 @@ run_target_search()
 run_reachable_set_analysis()
 
 run_global_optimization()
+
+analyze_attitude_requirements()
