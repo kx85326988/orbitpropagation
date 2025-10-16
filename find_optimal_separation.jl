@@ -69,6 +69,12 @@ gr() # GRバックエンドを使用する場合
 const mu_earth = 3.986004418e14
 const J2_coeff = 1.08263e-3
 const R_E = 6378137.0
+const R_LEO = 6903137.0 - 6378137.0 # 低軌道の代表的な高度 [m]
+const H_ATM = 8500.0              # 大気スケールハイトの例 [m]
+const RHO_0 = 1.225               # 地表での大気密度の例 [kg/m^3]
+const RHO_LEO = RHO_0 * exp(-R_LEO / H_ATM) # 軌道高度での大気密度を計算
+const BC_CHIEF = 0.01             # 主衛星の弾道係数の例 [m^2/kg]
+const DELTA_B_INIT = 0.1          # 初期ΔBの例 (副衛星が10%大きい)
 
 # --- 主衛星の初期軌道要素 ---
 a_c_stm_init = 6903137.0
@@ -206,7 +212,7 @@ function get_J_qns_inv_augmented_koenig(omega_c_val::Float64)::SMatrix{7,7,Float
     return SMatrix(J_inv_aug)
 end
 
-function get_A_prime_qns_augmented_koenig_selectable(ac_val::Float64, ec_val::Float64, ic_val::Float64, omegac_val::Float64, include_j2::Bool, include_drag_effects::Bool, drag_model_type::DragModelTypeForSTM)::Tuple{SMatrix{7,7,Float64}, SMatrix{7,7,Float64}, SMatrix{7,7,Float64}}
+function get_A_prime_qns_augmented_koenig_selectable(ac_val::Float64, ec_val::Float64, ic_val::Float64, omegac_val::Float64, include_j2::Bool, include_drag_effects::Bool, drag_model_type::DragModelTypeForSTM, rho_val::Float64, Bc_val::Float64)::Tuple{SMatrix{7,7,Float64}, SMatrix{7,7,Float64}, SMatrix{7,7,Float64}}
     A_kep_p=@MMatrix zeros(Float64,7,7); A_j2_p=@MMatrix zeros(Float64,7,7); A_drag_p=@MMatrix zeros(Float64,7,7)
     n_c=sqrt(mu_earth/ac_val^3); A_kep_p[2,1]=-1.5*n_c
     if include_j2
@@ -222,19 +228,48 @@ function get_A_prime_qns_augmented_koenig_selectable(ac_val::Float64, ec_val::Fl
         A_j2_p[6,1]=0.5*kappa_J2*S_g; A_j2_p[6,3]=-kappa_J2*G_f*S_g*ex_c; A_j2_p[6,4]=-kappa_J2*G_f*S_g*ey_c; A_j2_p[6,5]=kappa_J2*T_g
     end
     if include_drag_effects
-        if drag_model_type==DENSITY_MODEL_FREE; A_drag_p[1,7]=1.0;
-        elseif drag_model_type==DENSITY_MODEL_SPECIFIC; println("警告: DENSITY_MODEL_SPECIFIC のプラント行列は未実装です．") end
+        if drag_model_type==DENSITY_MODEL_FREE; A_drag_p[1,7]=1.0; #A_drag_p[3,7]=1-ec_val;
+        elseif drag_model_type==DENSITY_MODEL_SPECIFIC
+            # このモデルでは、aug_param (状態ベクトルの7番目の要素) が
+            # 無次元化された差動弾道係数 ΔB = (B_d - B_c) / B_c を表すと仮定
+            
+            # 差動抗力が主にδaとδeに与える永年的な影響をモデル化
+            
+            # 物理的な係数を計算
+            K_drag = -rho_val * n_c * ac_val * Bc_val
+
+            # d(δa_norm)/dt の δB に対する係数
+            A_drag_p[1,7] = K_drag
+            
+            # d(δex')/dt の δB に対する係数 (近円軌道近似)
+            # この項は、抗力によって軌道がより円に近づく効果（円軌道化）を表す
+            A_drag_p[3,7] = K_drag
+        end
     end
     return SMatrix(A_kep_p), SMatrix(A_j2_p), SMatrix(A_drag_p)
 end
 
 function get_STM_prime_qns_augmented_koenig_model_selectable(A_kep_prime::SMatrix{7,7,Float64}, A_j2_prime::SMatrix{7,7,Float64}, A_drag_prime::SMatrix{7,7,Float64}, t_prop::Float64, ec_val_for_drag_effect::Float64, include_drag_effects::Bool, drag_model_type::DragModelTypeForSTM)::SMatrix{7,7,Float64}
     A_kep_J2_prime=A_kep_prime+A_j2_prime
-    if drag_model_type==DENSITY_MODEL_FREE && include_drag_effects
-        Phi_drag_prime=SMatrix{7,7,Float64}(I)+A_drag_prime*t_prop
-        Integral_Phi_drag_prime=SMatrix{7,7,Float64}(I)*t_prop+A_drag_prime*(t_prop^2/2.0)
-        return Phi_drag_prime+A_kep_J2_prime*Integral_Phi_drag_prime
-    else; return SMatrix{7,7,Float64}(I)+A_kep_J2_prime*t_prop; end
+        # `include_drag_effects`がtrueであれば、モデルの種類を問わず、
+    # J2摂動と差動抗力のカップリングを考慮したSTMを計算する
+    if include_drag_effects
+        # 差動抗力のみによるSTM（Φ_drag'）
+        # exp(A*t) の1次近似: I + A*t
+        Phi_drag_prime = SMatrix{7,7,Float64}(I) + A_drag_prime * t_prop
+
+        # Φ_drag' の時間積分（∫Φ_drag' dt）
+        # I*t + 0.5*A*t^2
+        Integral_Phi_drag_prime = SMatrix{7,7,Float64}(I) * t_prop + A_drag_prime * (t_prop^2 / 2.0)
+        
+        # 論文 式(64)および(67)に基づき、J2と抗力のカップリング項を計算し、最終的なSTM'を返す
+        # Φ' = Φ_drag' + A_kep_j2' * ∫Φ_drag' dt
+        return Phi_drag_prime + A_kep_J2_prime * Integral_Phi_drag_prime
+    
+    # 抗力の影響がない場合は、ケプラーとJ2の線形STMを返す
+    else
+        return SMatrix{7,7,Float64}(I) + A_kep_J2_prime * t_prop
+    end
 end
 
 # ECI座標系の相対ベクトルを、主衛星中心のRTN座標系に変換する
@@ -379,12 +414,11 @@ function plot_results(angles_plot_list, cost_data, perturbation_setting, drag_mo
     println("HTMLレポートを保存しました: $html_filename")
 end
 
-function find_j2_invariant_maneuver(perturbation_setting::PerturbationType, separation_plane_setting::SeparationPlane)
-    drag_model_setting = DENSITY_MODEL_FREE
+function find_j2_invariant_maneuver(perturbation_setting::PerturbationType, separation_plane_setting::SeparationPlane, drag_model_setting::DragModelTypeForSTM)
     println("\n\n--- 目標ROEを達成するための最適分離マヌーバの探索を開始 ---")
-    println("Pert: $perturbation_setting, Plane: $separation_plane_setting, Propagation: $PROPAGATION_ORBITS orbits")
+    println("Pert: $perturbation_setting, Plane: $separation_plane_setting, DragM: $drag_model_setting, Propagation: $PROPAGATION_ORBITS orbits")
 
-    # ★★★ 1. 物理的なミッション要求から目標ROEターゲットを定義 ★★★
+    #  1. 物理的なミッション要求から目標ROEターゲットを定義 
 
     # --- 目標とする物理的な軌道形状 ---
     TARGET_DELTA_E_NORM_METERS = 500.0 # [m] 相対軌道の短軸半径
@@ -443,14 +477,26 @@ function find_j2_invariant_maneuver(perturbation_setting::PerturbationType, sepa
             state_deputy_init_eci=cw_to_eci_deputy_state(r_chief_init_eci,v_chief_init_eci,dr_lvlh_init,dv_lvlh_vec)
             oe_dep_init = sv_to_orbital_elements(CartesianStateECI(state_deputy_init_eci.r_vec, state_deputy_init_eci.v_vec))
             qns_roes_init=orbital_elements_to_qns_roe_koenig(oe_chief_eval,oe_dep_init)
-            roe_aug_init_vec=SVector(qns_roes_init.delta_a_norm, qns_roes_init.delta_lambda, qns_roes_init.delta_ex, qns_roes_init.delta_ey, qns_roes_init.delta_ix, qns_roes_init.delta_iy, delta_a_dot_drag)
-            
+
+            aug_param = 0.0
+            if drag_model_setting == DENSITY_MODEL_FREE
+                aug_param = delta_a_dot_drag
+            elseif drag_model_setting == DENSITY_MODEL_SPECIFIC
+                aug_param = DELTA_B_INIT
+            end
+            roe_aug_init_vec = SVector(
+                qns_roes_init.delta_a_norm, qns_roes_init.delta_lambda, 
+                qns_roes_init.delta_ex, qns_roes_init.delta_ey, 
+                qns_roes_init.delta_ix, qns_roes_init.delta_iy, 
+                aug_param
+            )
+                        
             omega_c_ti=oe_chief_eval.omega; omega_dot_j2,Omega_dot_j2=get_secular_j2_rates_koenig(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i)
             oe_chief_at_tf=OrbitalElementsClassical(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i,mod(oe_chief_eval.RAAN+Omega_dot_j2*tf_val,2*pi),mod(oe_chief_eval.omega+omega_dot_j2*tf_val,2*pi),0.0,oe_chief_eval.n,mod(oe_chief_eval.M+oe_chief_eval.n*tf_val,2*pi))
             oe_chief_at_tf=OrbitalElementsClassical(oe_chief_at_tf.a,oe_chief_at_tf.e,oe_chief_at_tf.i,oe_chief_at_tf.RAAN,oe_chief_at_tf.omega,SatelliteToolbox.mean_to_true_anomaly(oe_chief_at_tf.e,oe_chief_at_tf.M),oe_chief_at_tf.n,oe_chief_at_tf.M)
             
             omega_c_tf_val=oe_chief_at_tf.omega; J_ti=get_J_qns_augmented_koenig(omega_c_ti); J_tf_inv=get_J_qns_inv_augmented_koenig(omega_c_tf_val); roe_prime_init=J_ti*roe_aug_init_vec
-            A_kep_p, A_j2_p, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i,omega_c_ti,include_j2_active,include_drag_active_stm,drag_model_setting)
+            A_kep_p, A_j2_p, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i,omega_c_ti,include_j2_active,include_drag_active_stm,drag_model_setting, RHO_LEO, BC_CHIEF)
             STM_prime=get_STM_prime_qns_augmented_koenig_model_selectable(A_kep_p,A_j2_p,A_drag_p,tf_val,oe_chief_eval.e,include_drag_active_stm,drag_model_setting)
             roe_prime_final=STM_prime*roe_prime_init; roe_aug_final_vec=J_tf_inv*roe_prime_final
             
@@ -520,7 +566,7 @@ function analyze_optimal_result(optimal_angle_deg::Float64, optimal_dv_mag::Floa
     
     omega_c_ti=oe_chief_eval.omega; omega_c_tf_val=oe_chief_at_tf.omega; J_ti=get_J_qns_augmented_koenig(omega_c_ti); J_tf_inv=get_J_qns_inv_augmented_koenig(omega_c_tf_val);
     roe_prime_init=J_ti*roe_aug_init_vec
-    A_kep_p, A_j2_p, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i,omega_c_ti,true,true,DENSITY_MODEL_FREE)
+    A_kep_p, A_j2_p, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i,omega_c_ti,true,true,DENSITY_MODEL_FREE, RHO_LEO, BC_CHIEF)
     STM_prime=get_STM_prime_qns_augmented_koenig_model_selectable(A_kep_p,A_j2_p,A_drag_p,tf_val,oe_chief_eval.e,true,DENSITY_MODEL_FREE)
     roe_prime_final=STM_prime*roe_prime_init;
     
@@ -640,7 +686,7 @@ function calculate_reachable_set_data(dv_for_set::Float64, propagation_orbits::F
         omega_c_tf_val=mod(oe_chief_eval.omega+omega_dot_j2*tf_val,2*pi)
         J_ti=get_J_qns_augmented_koenig(omega_c_ti); J_tf_inv=get_J_qns_inv_augmented_koenig(omega_c_tf_val)
         roe_prime_init=J_ti*roe_aug_init_vec
-        A_kep_p, A_j2_p, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i,omega_c_ti,true,true,DENSITY_MODEL_FREE)
+        A_kep_p, A_j2_p, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i,omega_c_ti,true,true,DENSITY_MODEL_FREE, RHO_LEO, BC_CHIEF)
         STM_prime=get_STM_prime_qns_augmented_koenig_model_selectable(A_kep_p,A_j2_p,A_drag_p,tf_val,oe_chief_eval.e,true,DENSITY_MODEL_FREE)
         roe_prime_final=STM_prime*roe_prime_init
         roe_aug_final_vec=J_tf_inv*roe_prime_final
@@ -795,7 +841,7 @@ function run_sensitivity_analysis(base_angle_deg::Float64, base_dv_mag::Float64,
     oe_chief_at_tf = OrbitalElementsClassical(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i,mod(oe_chief_eval.RAAN+Omega_dot_j2*tf_val,2*pi),mod(oe_chief_eval.omega+omega_dot_j2*tf_val,2*pi),0.0,oe_chief_eval.n,mod(oe_chief_eval.M+oe_chief_eval.n*tf_val,2*pi))
     omega_c_ti=oe_chief_eval.omega; omega_c_tf_val=oe_chief_at_tf.omega; 
     J_ti=get_J_qns_augmented_koenig(omega_c_ti); J_tf_inv=get_J_qns_inv_augmented_koenig(omega_c_tf_val);
-    A_kep_p, A_j2_p, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i,omega_c_ti,true,true,DENSITY_MODEL_FREE)
+    A_kep_p, A_j2_p, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(oe_chief_eval.a,oe_chief_eval.e,oe_chief_eval.i,omega_c_ti,true,true,DENSITY_MODEL_FREE, RHO_LEO, BC_CHIEF)
     STM_prime=get_STM_prime_qns_augmented_koenig_model_selectable(A_kep_p,A_j2_p,A_drag_p,tf_val,oe_chief_eval.e,true,DENSITY_MODEL_FREE)
 
     # --- 誤差ループ ---
@@ -951,7 +997,7 @@ function objective_function(params::Vector{Float64}, target_roe_vec::SVector{7,F
         # STMを計算
         omega_c_ti = oe_chief_eval.omega; omega_c_tf_val = oe_chief_at_tf.omega
         J_ti = get_J_qns_augmented_koenig(omega_c_ti); J_tf_inv = get_J_qns_inv_augmented_koenig(omega_c_tf_val)
-        A_kep_p, A_j2_p, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(oe_chief_eval.a, oe_chief_eval.e, oe_chief_eval.i, omega_c_ti, true, true, DENSITY_MODEL_FREE)
+        A_kep_p, A_j2_p, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(oe_chief_eval.a, oe_chief_eval.e, oe_chief_eval.i, omega_c_ti, true, true, DENSITY_MODEL_FREE, RHO_LEO, BC_CHIEF)
         STM_prime = get_STM_prime_qns_augmented_koenig_model_selectable(A_kep_p, A_j2_p, A_drag_p, tf_val, oe_chief_eval.e, true, DENSITY_MODEL_FREE)
 
         # 副衛星の初期ROEを計算
@@ -1154,7 +1200,7 @@ function calculate_final_state(params::Vector{Float64})
         oe_chief_at_tf = OrbitalElementsClassical(oe_chief_eval.a, oe_chief_eval.e, oe_chief_eval.i, mod(oe_chief_eval.RAAN + Omega_dot_j2 * tf_val, 2*pi), mod(oe_chief_eval.omega + omega_dot_j2 * tf_val, 2*pi), 0.0, oe_chief_eval.n, mod(oe_chief_eval.M + oe_chief_eval.n * tf_val, 2*pi))
         omega_c_ti = oe_chief_eval.omega; omega_c_tf_val = oe_chief_at_tf.omega
         J_ti = get_J_qns_augmented_koenig(omega_c_ti); J_tf_inv = get_J_qns_inv_augmented_koenig(omega_c_tf_val)
-        A_kep_p, A_j2_p, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(oe_chief_eval.a, oe_chief_eval.e, oe_chief_eval.i, omega_c_ti, true, true, DENSITY_MODEL_FREE)
+        A_kep_p, A_j2_p, A_drag_p = get_A_prime_qns_augmented_koenig_selectable(oe_chief_eval.a, oe_chief_eval.e, oe_chief_eval.i, omega_c_ti, true, true, DENSITY_MODEL_FREE, RHO_LEO, BC_CHIEF)
         STM_prime = get_STM_prime_qns_augmented_koenig_model_selectable(A_kep_p, A_j2_p, A_drag_p, tf_val, oe_chief_eval.e, true, DENSITY_MODEL_FREE)
         oe_dep_init = sv_to_orbital_elements(state_deputy_init_eci)
         qns_roes_init = orbital_elements_to_qns_roe_koenig(oe_chief_eval, oe_dep_init)
@@ -1428,7 +1474,11 @@ end
 
 function run_target_search()
     # 最適解の探索
-    optimal_params, target_roe_vec = find_j2_invariant_maneuver(J2_AND_DRAG, RT_PLANE)
+    # 使用したい空気抵抗モデルをここで指定する
+    # DENSITY_MODEL_SPECIFIC: 物理パラメータ(大気密度, 弾道係数)に基づくモデル
+    # DENSITY_MODEL_FREE:     推定された軌道長半径の変化率に基づくモデ
+    drag_model_to_use = DENSITY_MODEL_SPECIFIC
+    optimal_params, target_roe_vec = find_j2_invariant_maneuver(J2_AND_DRAG, RT_PLANE, drag_model_to_use)
     
     # 最適解の結果を分析
     if optimal_params !== nothing
