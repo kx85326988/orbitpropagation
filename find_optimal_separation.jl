@@ -88,6 +88,7 @@ e_c_stm_init = 0.0022
 i_c_stm_init = deg2rad(97.65)
 Omega_c_stm_init = deg2rad(0.0)
 omega_c_stm_init = deg2rad(270.0)
+# omega_c_stm_init = deg2rad(180.0)
 M_c_stm_init = deg2rad(180.0)
 # omega_c_stm_init = deg2rad(0.0) #比較用
 # M_c_stm_init = deg2rad(0.0) #比較用
@@ -186,10 +187,33 @@ function orbital_elements_to_qns_roe_koenig(oe_c::OrbitalElementsClassical, oe_d
     delta_ix_val=oe_d.i-oe_c.i; delta_Omega_val=mod(oe_d.RAAN-oe_c.RAAN+pi,2*pi)-pi; delta_iy_val=delta_Omega_val*sin(oe_c.i)
     return QuasiNonsingularROEsKoenig(delta_a_norm_val,delta_lambda_val,delta_ex_val,delta_ey_val,delta_ix_val,delta_iy_val)
 end
-# 逆変換: 最終ROEから副衛星の軌道要素
-function final_roe_to_deputy_oe(oe_chief_final::OrbitalElementsClassical, final_roes::SVector{7,Float64})::OrbitalElementsClassical
+# # 逆変換: 最終ROEから副衛星の軌道要素
+# function final_roe_to_deputy_oe(oe_chief_final::OrbitalElementsClassical, final_roes::SVector{7,Float64})::OrbitalElementsClassical
+#     ac,ec,ic,Omegac,omegac,Mc=oe_chief_final.a,oe_chief_final.e,oe_chief_final.i,oe_chief_final.RAAN,oe_chief_final.omega,oe_chief_final.M
+#     delta_a_norm_val=final_roes[1]; delta_lambda_val=final_roes[2]; delta_ex_val=final_roes[3]; delta_ey_val=final_roes[4]; delta_ix_val=final_roes[5]; delta_iy_val=final_roes[6]
+#     ad=ac*(1.0+delta_a_norm_val); id=ic+delta_ix_val; Omegad=Omegac
+#     if abs(sin(ic))>1e-7; Omegad=Omegac+delta_iy_val/sin(ic); end; Omegad=mod(Omegad,2*pi)
+#     X=delta_ex_val+ec*cos(omegac); Y=delta_ey_val+ec*sin(omegac); ed=sqrt(X^2+Y^2); if ed<1e-10; ed=1e-10; end
+#     omegad=0.0; if ed>1e-9; omegad=atan(Y,X); if omegad<0.0; omegad+=2*pi; end; end
+#     Md=delta_lambda_val+(Mc+omegac+Omegac*cos(ic))-(omegad+Omegad*cos(ic)); Md=mod(Md,2*pi); if Md<0.0; Md+=2*pi; end
+#     nd=sqrt(mu_earth/abs(ad)^3); f_true_d_val = SatelliteToolbox.mean_to_true_anomaly(ed, Md)
+#     return OrbitalElementsClassical(ad,ed,id,Omegad,omegad,f_true_d_val,nd,Md)
+# end
+# ==============================================================================
+# 修正版: final_roe_to_deputy_oe
+# (引数 final_roes の型制約を SVector から AbstractVector に緩和)
+# ==============================================================================
+function final_roe_to_deputy_oe(oe_chief_final::OrbitalElementsClassical, final_roes::AbstractVector)::OrbitalElementsClassical
     ac,ec,ic,Omegac,omegac,Mc=oe_chief_final.a,oe_chief_final.e,oe_chief_final.i,oe_chief_final.RAAN,oe_chief_final.omega,oe_chief_final.M
-    delta_a_norm_val=final_roes[1]; delta_lambda_val=final_roes[2]; delta_ex_val=final_roes[3]; delta_ey_val=final_roes[4]; delta_ix_val=final_roes[5]; delta_iy_val=final_roes[6]
+    
+    # Vector{Any}の場合もあるため、念のためFloat64にキャストして取り出す
+    delta_a_norm_val = Float64(final_roes[1])
+    delta_lambda_val = Float64(final_roes[2])
+    delta_ex_val     = Float64(final_roes[3])
+    delta_ey_val     = Float64(final_roes[4])
+    delta_ix_val     = Float64(final_roes[5])
+    delta_iy_val     = Float64(final_roes[6])
+    
     ad=ac*(1.0+delta_a_norm_val); id=ic+delta_ix_val; Omegad=Omegac
     if abs(sin(ic))>1e-7; Omegad=Omegac+delta_iy_val/sin(ic); end; Omegad=mod(Omegad,2*pi)
     X=delta_ex_val+ec*cos(omegac); Y=delta_ey_val+ec*sin(omegac); ed=sqrt(X^2+Y^2); if ed<1e-10; ed=1e-10; end
@@ -706,140 +730,250 @@ function find_j2_invariant_maneuver(perturbation_setting::PerturbationType, sepa
     return optimal_params, roe_target_vec
 end
 
+# # ==============================================================================
+# # 差動抗力による軌道補正シミュレーション関数
+# # ==============================================================================
+# function run_drag_correction_simulation(
+#     initial_roe_vec::SVector{7,Float64}, 
+#     chief_oe_initial::OrbitalElementsClassical, 
+#     target_roe_vec::SVector{7,Float64},
+#     W::Diagonal,
+#     is_debug_run::Bool = false # 最適解を見つけた後の最終確認用フラグ
+#     )::Float64
+    
+#     num_segments = Int(floor(PROPAGATION_ORBITS / SIM_SEGMENT_ORBITS))
+#     segment_time = SIM_SEGMENT_ORBITS * 2.0 * pi * sqrt(chief_oe_initial.a^3 / mu_earth)
+    
+#     current_roe = initial_roe_vec
+#     current_chief_oe = chief_oe_initial
+    
+#     # 現在のδBを保持する変数を初期化
+#     current_delta_B = initial_roe_vec[7] # 初期分離時のδBから開始
+
+#     # 1次遅れフィルタの係数を計算
+#     alpha = 1.0 - exp(-segment_time / ATTITUDE_CHANGE_TIMECONSTANT_SEC)
+    
+#     for i in 1:num_segments
+
+#         #残り時間を使って、無制御の場合の最終状態を予測
+#         time_to_go = (PROPAGATION_ORBITS - (i-1)*SIM_SEGMENT_ORBITS) * 2.0 * pi * sqrt(current_chief_oe.a^3 / mu_earth)
+        
+#         # 予測時にはδB=0と仮定
+#         roe_for_prediction = SVector(
+#             current_roe[1], current_roe[2], current_roe[3], current_roe[4],
+#             current_roe[5], current_roe[6], 0.0 # 無制御なのでδB=0
+#         )
+
+#         # 予測用のSTMを計算（抗力の影響はゼロとして計算）
+#         omega_c_ti_pred = current_chief_oe.omega
+#         omega_dot_j2_pred, Omega_dot_j2_pred = get_secular_j2_rates_koenig(current_chief_oe.a, current_chief_oe.e, current_chief_oe.i)
+#         oe_chief_at_tf_pred = OrbitalElementsClassical(current_chief_oe.a,current_chief_oe.e,current_chief_oe.i,mod(current_chief_oe.RAAN+Omega_dot_j2_pred*time_to_go,2*pi),mod(current_chief_oe.omega+omega_dot_j2_pred*time_to_go,2*pi),0.0,current_chief_oe.n,mod(current_chief_oe.M+current_chief_oe.n*time_to_go,2*pi))
+        
+#         omega_c_tf_val_pred = oe_chief_at_tf_pred.omega
+#         J_ti_pred = get_J_qns_augmented_koenig(omega_c_ti_pred)
+#         J_tf_inv_pred = get_J_qns_inv_augmented_koenig(omega_c_tf_val_pred)
+        
+#         # 無制御なので、A_drag_pはゼロ行列を使用
+#         A_kep_p_pred, A_j2_p_pred, _ = get_A_prime_qns_augmented_koenig_selectable(current_chief_oe.a,current_chief_oe.e,current_chief_oe.i,omega_c_ti_pred,true,false,NO_DRAG, 0.0, 0.0)
+#         STM_prime_pred = get_STM_prime_qns_augmented_koenig_model_selectable(A_kep_p_pred,A_j2_p_pred,SMatrix{7,7,Float64}(zeros(7,7)),time_to_go,current_chief_oe.e,false,NO_DRAG)
+        
+#         # 現在の状態（current_roe）を無制御で最後まで伝播させて、最終状態を予測
+#         roe_prime_init_pred = J_ti_pred * roe_for_prediction
+#         roe_prime_final_pred = STM_prime_pred * roe_prime_init_pred
+#         predicted_final_roe = J_tf_inv_pred * roe_prime_final_pred
+        
+#         # 制御指令値の決定（物理量ベース）
+#         predicted_final_error_da_norm = predicted_final_roe[1] - target_roe_vec[1]
+        
+#         # 物理的な誤差（単位:m）で指令値を計算
+#         # ゲインのスケールも調整（物理量に合わせる）
+#         PHYSICAL_CONTROL_GAIN = 1.0 
+#         delta_B_command = clamp(PHYSICAL_CONTROL_GAIN * (predicted_final_error_da_norm * current_chief_oe.a), DELTA_B_MIN, DELTA_B_MAX)
+
+#         # 決定したδBを使って、1セグメント分だけ「実際に」伝播させる
+#         roe_aug_init_segment = SVector(
+#             current_roe[1], current_roe[2], current_roe[3], current_roe[4],
+#             current_roe[5], current_roe[6],
+#             current_delta_B
+#         )
+        
+#         omega_c_ti_actual=current_chief_oe.omega; omega_dot_j2_actual,Omega_dot_j2_actual=get_secular_j2_rates_koenig(current_chief_oe.a,current_chief_oe.e,current_chief_oe.i)
+#         oe_chief_at_tf_segment=OrbitalElementsClassical(current_chief_oe.a,current_chief_oe.e,current_chief_oe.i,mod(current_chief_oe.RAAN+Omega_dot_j2_actual*segment_time,2*pi),mod(current_chief_oe.omega+omega_dot_j2_actual*segment_time,2*pi),0.0,current_chief_oe.n,mod(current_chief_oe.M+current_chief_oe.n*segment_time,2*pi))
+        
+#         omega_c_tf_val_segment=oe_chief_at_tf_segment.omega; J_ti_actual=get_J_qns_augmented_koenig(omega_c_ti_actual); J_tf_inv_actual=get_J_qns_inv_augmented_koenig(omega_c_tf_val_segment); roe_prime_init_actual=J_ti_actual*roe_aug_init_segment
+        
+#         A_kep_p_actual, A_j2_p_actual, A_drag_p_actual = get_A_prime_qns_augmented_koenig_selectable(current_chief_oe.a,current_chief_oe.e,current_chief_oe.i,omega_c_ti_actual,true,true,DENSITY_MODEL_SPECIFIC, RHO_LEO, BC_CHIEF)
+#         STM_prime_actual=get_STM_prime_qns_augmented_koenig_model_selectable(A_kep_p_actual,A_j2_p_actual,A_drag_p_actual,segment_time,current_chief_oe.e,true,DENSITY_MODEL_SPECIFIC)
+        
+#         roe_prime_final_actual=STM_prime_actual*roe_prime_init_actual; roe_aug_final_actual=J_tf_inv_actual*roe_prime_final_actual
+
+#         # if is_debug_run
+#         #     println("\n" * "-"^30 * " セグメント $i " * "-"^30)
+#         #     @printf "  [開始時] δa: %8.2fm (norm: %.3e) | current_δB: %.4f\n" (current_roe[1]*current_chief_oe.a) current_roe[1] current_delta_B
+#         #     @printf "  [予測]   最終誤差: %8.2fm -> δB指令: %.4f\n" (predicted_final_error_da_norm*current_chief_oe.a) delta_B_command
+#         #     @printf "  [実行]   STM'[1,7] = %.3e | STM'[2,7] = %.3e\n" STM_prime_actual[1,7] STM_prime_actual[2,7]
+#         #     @printf "  [結果]   δa: %8.2fm (norm: %.3e)\n" (roe_aug_final_actual[1]*current_chief_oe.a) roe_aug_final_actual[1]
+#         # end
+  
+#         # 状態の更新
+#         current_roe = roe_aug_final_actual
+#         current_chief_oe = oe_chief_at_tf_segment
+
+#         # 次のステップのδBを、1次遅れモデルで更新
+#         current_delta_B = alpha * delta_B_command + (1.0 - alpha) * current_delta_B
+#     end
+    
+#     # 最終的なコストを計算して返す
+#     final_cost = dot(current_roe - target_roe_vec, W * (current_roe - target_roe_vec))
+#     if is_debug_run
+#         println("\n" * "─"^70)
+#         @printf "  最終コスト: %.4e\n" final_cost
+#         println("  最終ROEベクトル: ")
+#         @printf "    δa_norm: %.3e\n" current_roe[1]
+#         @printf "    δλ:     %.3e\n" current_roe[2]
+#         @printf "    δex:    %.3e\n" current_roe[3]
+#         @printf "    δey:    %.3e\n" current_roe[4]
+#         @printf "    δix:    %.3e\n" current_roe[5]
+#         @printf "    δiy:    %.3e\n" current_roe[6]
+#         println("─"^70)
+#     end
+#     return final_cost
+# end
 # ==============================================================================
-# 差動抗力による軌道補正シミュレーション関数
+# 差動抗力による軌道補正シミュレーション関数 (修正版: 符号修正)
 # ==============================================================================
 function run_drag_correction_simulation(
     initial_roe_vec::SVector{7,Float64}, 
     chief_oe_initial::OrbitalElementsClassical, 
     target_roe_vec::SVector{7,Float64},
     W::Diagonal,
-    is_debug_run::Bool = false # 最適解を見つけた後の最終確認用フラグ
+    is_debug_run::Bool = false,
+    duration_orbits::Float64 = PROPAGATION_ORBITS # デフォルトは元の定数
     )::Float64
+
+    initial_da_meters = initial_roe_vec[1] * chief_oe_initial.a
+
+    if is_debug_run
+        println("\n" * "─"^70)
+        println("★★★ 軌道補正シミュレーション詳細ログ（符号修正版） ★★★")
+        println("─"^70)
+        println("  更新周期: $(SIM_SEGMENT_ORBITS) 軌道周期 (約$(round(SIM_SEGMENT_ORBITS*93, digits=1))分)")
+    end
     
-    num_segments = Int(floor(PROPAGATION_ORBITS / SIM_SEGMENT_ORBITS))
+    num_segments = Int(floor(duration_orbits / SIM_SEGMENT_ORBITS))      # 変更後
     segment_time = SIM_SEGMENT_ORBITS * 2.0 * pi * sqrt(chief_oe_initial.a^3 / mu_earth)
     
     current_roe = initial_roe_vec
     current_chief_oe = chief_oe_initial
-    
-    # 現在のδBを保持する変数を初期化
-    current_delta_B = initial_roe_vec[7] # 初期分離時のδBから開始
-
-    # 1次遅れフィルタの係数を計算
+    current_delta_B = initial_roe_vec[7]
     alpha = 1.0 - exp(-segment_time / ATTITUDE_CHANGE_TIMECONSTANT_SEC)
     
+    time_history = Float64[]
+    da_history = Float64[]
+    db_history = Float64[]
+    
+    push!(time_history, 0.0)
+    push!(da_history, current_roe[1] * current_chief_oe.a)
+    push!(db_history, current_delta_B)
+
     for i in 1:num_segments
-
-        #残り時間を使って、無制御の場合の最終状態を予測
         time_to_go = (PROPAGATION_ORBITS - (i-1)*SIM_SEGMENT_ORBITS) * 2.0 * pi * sqrt(current_chief_oe.a^3 / mu_earth)
+        omega_c_ti_pred = current_chief_oe.omega; omega_dot_j2_pred, _ = get_secular_j2_rates_koenig(current_chief_oe.a, current_chief_oe.e, current_chief_oe.i)
+        oe_chief_at_tf_pred = OrbitalElementsClassical(current_chief_oe.a,current_chief_oe.e,current_chief_oe.i,0.0,mod(current_chief_oe.omega+omega_dot_j2_pred*time_to_go,2*pi),0.0,current_chief_oe.n,0.0)
         
-        # 予測時にはδB=0と仮定
-        roe_for_prediction = SVector(
-            current_roe[1], current_roe[2], current_roe[3], current_roe[4],
-            current_roe[5], current_roe[6], 0.0 # 無制御なのでδB=0
-        )
+        A_kep, A_j2, A_drag = get_A_prime_qns_augmented_koenig_selectable(current_chief_oe.a,current_chief_oe.e,current_chief_oe.i,current_chief_oe.omega,true,true,DENSITY_MODEL_SPECIFIC, RHO_LEO, BC_CHIEF)
+        K_drag_val = A_drag[1,7] # これは通常マイナスの値 (密度係数)
+        
+        # 簡易予測: 何もしないとどうなるか
+        # (現在のδBではなく、中立状態(δB=0)で進んだ場合との差分を見るべきだが、
+        #  ここでは単純なP制御として「現在の偏差」を見る)
+        current_da_norm = current_roe[1]
+        error_da_norm = current_da_norm - target_roe_vec[1]
+        error_da_meters = error_da_norm * current_chief_oe.a
+        
+        # ★★★ 符号修正 ★★★
+        # δa が高い(プラス) -> 下げたい -> 抗力(δB)を増やす
+        # δa が低い(マイナス) -> 上げたい(減りを抑えたい) -> 抗力(δB)を減らす
+        # K_drag_val はマイナスの値なので、
+        # d(δa)/dt = K * δB
+        # 減らしたいなら d(δa)/dt < 0 にしたい -> K(-) * δB(+) -> δBはプラス
+        # つまり、誤差(error)がプラスなら、δBもプラスにしたい。
+        
+        PHYSICAL_CONTROL_GAIN = 1.5 # ゲイン調整 (大きくする)
+        
+        # 以前はマイナスを掛けていたが、プラスにする
+        delta_B_req = error_da_meters * PHYSICAL_CONTROL_GAIN
+        
+        delta_B_command = clamp(delta_B_req, DELTA_B_MIN, DELTA_B_MAX)
 
-        # 予測用のSTMを計算（抗力の影響はゼロとして計算）
-        omega_c_ti_pred = current_chief_oe.omega
-        omega_dot_j2_pred, Omega_dot_j2_pred = get_secular_j2_rates_koenig(current_chief_oe.a, current_chief_oe.e, current_chief_oe.i)
-        oe_chief_at_tf_pred = OrbitalElementsClassical(current_chief_oe.a,current_chief_oe.e,current_chief_oe.i,mod(current_chief_oe.RAAN+Omega_dot_j2_pred*time_to_go,2*pi),mod(current_chief_oe.omega+omega_dot_j2_pred*time_to_go,2*pi),0.0,current_chief_oe.n,mod(current_chief_oe.M+current_chief_oe.n*time_to_go,2*pi))
+        # --- 実伝播 ---
+        roe_aug_init = SVector(current_roe[1], current_roe[2], current_roe[3], current_roe[4], current_roe[5], current_roe[6], current_delta_B)
+        omega_dot, Omega_dot = get_secular_j2_rates_koenig(current_chief_oe.a, current_chief_oe.e, current_chief_oe.i)
+        omega_c_tf = current_chief_oe.omega + omega_dot * segment_time
+        J_t0 = get_J_qns_augmented_koenig(current_chief_oe.omega)
+        J_tf_inv = get_J_qns_inv_augmented_koenig(omega_c_tf)
+        STM = get_STM_prime_qns_augmented_koenig_model_selectable(A_kep, A_j2, A_drag, segment_time, current_chief_oe.e, true, DENSITY_MODEL_SPECIFIC)
+        roe_aug_final = J_tf_inv * STM * J_t0 * roe_aug_init
         
-        omega_c_tf_val_pred = oe_chief_at_tf_pred.omega
-        J_ti_pred = get_J_qns_augmented_koenig(omega_c_ti_pred)
-        J_tf_inv_pred = get_J_qns_inv_augmented_koenig(omega_c_tf_val_pred)
-        
-        # 無制御なので、A_drag_pはゼロ行列を使用
-        A_kep_p_pred, A_j2_p_pred, _ = get_A_prime_qns_augmented_koenig_selectable(current_chief_oe.a,current_chief_oe.e,current_chief_oe.i,omega_c_ti_pred,true,false,NO_DRAG, 0.0, 0.0)
-        STM_prime_pred = get_STM_prime_qns_augmented_koenig_model_selectable(A_kep_p_pred,A_j2_p_pred,SMatrix{7,7,Float64}(zeros(7,7)),time_to_go,current_chief_oe.e,false,NO_DRAG)
-        
-        # 現在の状態（current_roe）を無制御で最後まで伝播させて、最終状態を予測
-        roe_prime_init_pred = J_ti_pred * roe_for_prediction
-        roe_prime_final_pred = STM_prime_pred * roe_prime_init_pred
-        predicted_final_roe = J_tf_inv_pred * roe_prime_final_pred
-        
-        # 制御指令値の決定（物理量ベース）
-        predicted_final_error_da_norm = predicted_final_roe[1] - target_roe_vec[1]
-        
-        # 物理的な誤差（単位:m）で指令値を計算
-        # ゲインのスケールも調整（物理量に合わせる）
-        PHYSICAL_CONTROL_GAIN = 1.0 
-        delta_B_command = clamp(PHYSICAL_CONTROL_GAIN * (predicted_final_error_da_norm * current_chief_oe.a), DELTA_B_MIN, DELTA_B_MAX)
-
-        # 決定したδBを使って、1セグメント分だけ「実際に」伝播させる
-        roe_aug_init_segment = SVector(
-            current_roe[1], current_roe[2], current_roe[3], current_roe[4],
-            current_roe[5], current_roe[6],
-            current_delta_B
-        )
-        
-        omega_c_ti_actual=current_chief_oe.omega; omega_dot_j2_actual,Omega_dot_j2_actual=get_secular_j2_rates_koenig(current_chief_oe.a,current_chief_oe.e,current_chief_oe.i)
-        oe_chief_at_tf_segment=OrbitalElementsClassical(current_chief_oe.a,current_chief_oe.e,current_chief_oe.i,mod(current_chief_oe.RAAN+Omega_dot_j2_actual*segment_time,2*pi),mod(current_chief_oe.omega+omega_dot_j2_actual*segment_time,2*pi),0.0,current_chief_oe.n,mod(current_chief_oe.M+current_chief_oe.n*segment_time,2*pi))
-        
-        omega_c_tf_val_segment=oe_chief_at_tf_segment.omega; J_ti_actual=get_J_qns_augmented_koenig(omega_c_ti_actual); J_tf_inv_actual=get_J_qns_inv_augmented_koenig(omega_c_tf_val_segment); roe_prime_init_actual=J_ti_actual*roe_aug_init_segment
-        
-        A_kep_p_actual, A_j2_p_actual, A_drag_p_actual = get_A_prime_qns_augmented_koenig_selectable(current_chief_oe.a,current_chief_oe.e,current_chief_oe.i,omega_c_ti_actual,true,true,DENSITY_MODEL_SPECIFIC, RHO_LEO, BC_CHIEF)
-        STM_prime_actual=get_STM_prime_qns_augmented_koenig_model_selectable(A_kep_p_actual,A_j2_p_actual,A_drag_p_actual,segment_time,current_chief_oe.e,true,DENSITY_MODEL_SPECIFIC)
-        
-        roe_prime_final_actual=STM_prime_actual*roe_prime_init_actual; roe_aug_final_actual=J_tf_inv_actual*roe_prime_final_actual
-
-        # if is_debug_run
-        #     println("\n" * "-"^30 * " セグメント $i " * "-"^30)
-        #     @printf "  [開始時] δa: %8.2fm (norm: %.3e) | current_δB: %.4f\n" (current_roe[1]*current_chief_oe.a) current_roe[1] current_delta_B
-        #     @printf "  [予測]   最終誤差: %8.2fm -> δB指令: %.4f\n" (predicted_final_error_da_norm*current_chief_oe.a) delta_B_command
-        #     @printf "  [実行]   STM'[1,7] = %.3e | STM'[2,7] = %.3e\n" STM_prime_actual[1,7] STM_prime_actual[2,7]
-        #     @printf "  [結果]   δa: %8.2fm (norm: %.3e)\n" (roe_aug_final_actual[1]*current_chief_oe.a) roe_aug_final_actual[1]
-        # end
-  
-        # 状態の更新
-        current_roe = roe_aug_final_actual
-        current_chief_oe = oe_chief_at_tf_segment
-
-        # 次のステップのδBを、1次遅れモデルで更新
+        current_roe = roe_aug_final
+        new_M = mod(current_chief_oe.M + current_chief_oe.n * segment_time, 2*pi)
+        new_omega = mod(current_chief_oe.omega + omega_dot * segment_time, 2*pi)
+        new_RAAN = mod(current_chief_oe.RAAN + Omega_dot * segment_time, 2*pi)
+        current_chief_oe = OrbitalElementsClassical(current_chief_oe.a, current_chief_oe.e, current_chief_oe.i, new_RAAN, new_omega, 0.0, current_chief_oe.n, new_M)
         current_delta_B = alpha * delta_B_command + (1.0 - alpha) * current_delta_B
+        
+        push!(time_history, i * segment_time)
+        push!(da_history, current_roe[1] * current_chief_oe.a)
+        push!(db_history, current_delta_B)
     end
     
-    # 最終的なコストを計算して返す
     final_cost = dot(current_roe - target_roe_vec, W * (current_roe - target_roe_vec))
+    
     if is_debug_run
-        println("\n" * "─"^70)
-        @printf "  最終コスト: %.4e\n" final_cost
-        println("  最終ROEベクトル: ")
-        @printf "    δa_norm: %.3e\n" current_roe[1]
-        @printf "    δλ:     %.3e\n" current_roe[2]
-        @printf "    δex:    %.3e\n" current_roe[3]
-        @printf "    δey:    %.3e\n" current_roe[4]
-        @printf "    δix:    %.3e\n" current_roe[5]
-        @printf "    δiy:    %.3e\n" current_roe[6]
-        println("─"^70)
+        final_da_meters = current_roe[1] * current_chief_oe.a
+        println("\n  [結果] 初期δa: $(initial_da_meters) m -> 最終δa: $(final_da_meters) m")
+        
+        default(dpi=300, guidefontsize=12, tickfontsize=10, legendfontsize=10, titlefontsize=12, margin=10Plots.mm)
+        time_orbits = time_history ./ (2.0 * pi * sqrt(chief_oe_initial.a^3 / mu_earth))
+        p_da = plot(time_orbits, da_history, label="δa [m]", xlabel="Time [orbits]", ylabel="δa [m]", title="Evolution of δa under Drag Control", lw=3, color=:blue, yformatter=:scientific)
+        p_db = plot(time_orbits, db_history, label="δB (Input)", xlabel="Time [orbits]", ylabel="δB [-]", title="Control Input History", lw=3, color=:red)
+        p_combined = plot(p_da, p_db, layout=(2,1), size=(1000, 800))
+        timestamp = Dates.format(now(), "yyyy-mm-dd_HH-MM-SS")
+        filename = "delta_a_history_corrected_$(timestamp).png"
+        savefig(p_combined, filename)
+        println("グラフを保存しました: $filename")
+        display(p_combined)
     end
+
     return final_cost
 end
 
 # ==============================================================================
-# 単一ケースでの軌道補正デバッグ関数
+# 単一ケースでの軌道補正デバッグ関数 (時間短縮版)
 # ==============================================================================
 function debug_single_correction_case()
     println("\n" * "="^60)
-    println("単一ケースでの軌道補正デバッグを開始します。")
+    println("単一ケースでの軌道補正デバッグ (2.5軌道周期)")
     println("="^60)
-    # --- 目標とする物理的な軌道形状 ---
-    TARGET_DELTA_E_NORM_METERS = 500.0 # [m] 相対軌道の短軸半径
-    TARGET_Z_MAX_METERS      = 1.0  # [m] 許容される最大軌道面外ずれ
+    
+    TARGET_DELTA_E_NORM_METERS = 500.0 
+    TARGET_Z_MAX_METERS      = 1.0
 
-    # --- 1. 検証する初期分離マヌーバを設定 ---
-    # (制御なしの場合に最適だった値を設定)
+    # 検証する初期分離マヌーバ
     dv_mag_case = 0.5
     angle_deg_case = 180.0
     println("検証ケース: 分離速度 = $(dv_mag_case) m/s, 分離方向 = $(angle_deg_case) deg")
 
-    # --- 2. 必要な初期設定 (find_j2_invariant_maneuverから抜粋) ---
+    # 初期設定
     target_roe_vec = SVector{7,Float64}(
         0.0, 0.0, TARGET_DELTA_E_NORM_METERS / a_c_stm_init, 0.0,
         0.0, TARGET_Z_MAX_METERS / a_c_stm_init, 0.0
     )
     W = Diagonal(SVector{7,Float64}(1.0e6, 1.0, 1.0e3, 1.0e3, 1.0e3, 1.0e3, 0.0))
-    oe_chief_initial_for_sv = OrbitalElementsClassical(a_c_stm_init,e_c_stm_init,i_c_stm_init,Omega_c_stm_init,omega_c_stm_init,0.0,0.0,M_c_stm_init)
+    
+    n_init = sqrt(mu_earth / a_c_stm_init^3)
+    oe_chief_initial_for_sv = OrbitalElementsClassical(a_c_stm_init,e_c_stm_init,i_c_stm_init,Omega_c_stm_init,omega_c_stm_init,0.0,n_init,M_c_stm_init)
+    
     posvel_chief_initial_eci_vec = orbital_elements_to_sv(oe_chief_initial_for_sv)
     r_chief_init_eci=SVector{3}(posvel_chief_initial_eci_vec[1:3]); v_chief_init_eci=SVector{3}(posvel_chief_initial_eci_vec[4:6])
     oe_chief_eval = sv_to_orbital_elements(CartesianStateECI(r_chief_init_eci, v_chief_init_eci))
@@ -856,11 +990,19 @@ function debug_single_correction_case()
         qns_roes_init.delta_a_norm, qns_roes_init.delta_lambda, 
         qns_roes_init.delta_ex, qns_roes_init.delta_ey, 
         qns_roes_init.delta_ix, qns_roes_init.delta_iy, 
-        DELTA_B_INIT # 初期δBを設定
+        DELTA_B_INIT 
     )
 
-    # --- 3. 軌道補正シミュレーションを詳細ログモードで実行 ---
-    final_cost = run_drag_correction_simulation(initial_roe_vec, oe_chief_eval, target_roe_vec, W, true)
+    # ★★★ 修正: シミュレーション時間を一時的に変更するためのハック ★★★
+    # run_drag_correction_simulation はグローバル定数 PROPAGATION_ORBITS を参照するため、
+    # ここで一時的に上書きするか、関数の引数に時間を追加するのが正攻法ですが、
+    # 簡単のためグローバル定数の値を変更して呼び出します。
+    # (Juliaの定数変更は警告が出ますが、デバッグ用途なら許容範囲です)
+    
+    # ※ ただし、Juliaではconstの再定義はエラーになる場合があるため、
+    # 関数に引数 `duration_orbits` を追加する修正を行います。
+    
+    final_cost = run_drag_correction_simulation(initial_roe_vec, oe_chief_eval, target_roe_vec, W, true, 2.5) # 2.5軌道周期を指定
 
     println("\n" * "="^60)
     @printf "デバッグ実行完了。最終コスト: %.3e\n" final_cost
@@ -2747,7 +2889,7 @@ function plot_sensitivity_contribution(contributions_data)
 
     # --- グラフ設定 (高画質化) ---
     # DPIを300に設定し、フォントサイズも調整
-    default(dpi=300, guidefontsize=10, tickfontsize=8, legendfontsize=8, titlefontsize=11)
+    default(dpi=300, guidefontsize=18, tickfontsize=14, legendfontsize=18, titlefontsize=20)
 
     # --- グラフ1: 絶対量（メートル） ---
     p1 = groupedbar(data_matrix', 
@@ -2759,7 +2901,11 @@ function plot_sensitivity_contribution(contributions_data)
         ylabel = "1σ Error [m]",
         # xlabel = "ROE Component",
         legend = :outertopright,
-        palette = :tab10
+        palette = :tab10,
+        left_margin = 15Plots.mm,
+        bottom_margin = 20Plots.mm,
+        top_margin = 20Plots.mm,
+        right_margin = 10Plots.mm
     )
 
     # --- グラフ2: 構成比（％） ---
@@ -2781,12 +2927,16 @@ function plot_sensitivity_contribution(contributions_data)
         # xlabel = "ROE Component",
         legend = :outertopright,
         palette = :tab10,
-        ylims = (0, 105)
+        ylims = (0, 105),
+        left_margin = 15Plots.mm,
+        bottom_margin = 20Plots.mm,
+        top_margin = 20Plots.mm,
+        right_margin = 10Plots.mm
     )
 
     # まとめて表示・保存
     # サイズを大きめに確保
-    final_plot = plot(p1, p2, layout=(2,1), size=(1000, 1200))
+    final_plot = plot(p1, p2, layout=(2,1), size=(1200, 1400))
     display(final_plot)
     
     timestamp = Dates.format(now(), "yyyy-mm-dd_HH-MM-SS")
@@ -2798,12 +2948,160 @@ function plot_sensitivity_contribution(contributions_data)
 end
 
 
+# # ==============================================================================
+# # 「地球周回低軌道における超小型スターシェード衛星システムの編隊維持に必要な速度調整量」式(5)の近似GVEを用いた感度解析
+# # ==============================================================================
+# function run_symbolic_sensitivity_analysis_pdf_eq5(nominal_dv_T::Float64)
+#     println("\n" * "="^60)
+#     println("PDF式(5) [近似GVE] による感度解析 & 可視化")
+#     println("="^60)
+
+#     # --- 1. 誤差の設定 ---
+#     sigma_dv    = 0.001 * abs(nominal_dv_T)
+#     sigma_theta = deg2rad(1.0)
+#     sigma_psi   = deg2rad(1.0)
+#     sigma_u     = deg2rad(0.1)
+
+#     println("[設定誤差標準偏差 (1σ)]")
+#     @printf "  Δv誤差: %.3e [m/s], 位相: %.3f [deg], 軸: %.3f [deg], 位置: %.3f [deg]\n" sigma_dv rad2deg(sigma_theta) rad2deg(sigma_psi) rad2deg(sigma_u)
+
+#     # -------------------------------------------------------
+#     # 2. 変数定義
+#     # -------------------------------------------------------
+#     @variables a_c e_c i_c omega_c Omega_c M_c t_tgt rho_sym Bc_sym dB_sym
+#     @variables d_dv d_theta d_psi d_u
+#     @variables dv_nom theta_nom u_nom
+
+#     # -------------------------------------------------------
+#     # 3. 分離ベクトルのモデル化 (RTN)
+#     # -------------------------------------------------------
+#     v_mag = dv_nom + d_dv
+#     th    = theta_nom + d_theta
+#     ps    = d_psi 
+    
+#     dv_R = v_mag * cos(ps) * cos(th)
+#     dv_T = v_mag * cos(ps) * sin(th)
+#     dv_N = v_mag * sin(ps)
+    
+#     # -------------------------------------------------------
+#     # 4. PDF式(5) による Δα の計算 (近似GVE)
+#     # -------------------------------------------------------
+#     u_sep = u_nom + d_u
+#     f_sep = u_sep - omega_c
+#     n_sym = sqrt(mu_earth / a_c^3)
+    
+#     delta_a_pdf = (2 / n_sym) * (e_c * sin(f_sep) * dv_R + (1 + e_c * cos(f_sep)) * dv_T)
+#     delta_e_pdf = (1 / (n_sym * a_c)) * (sin(f_sep) * dv_R + ((2 - e_c * cos(f_sep)) + e_c) * dv_T)
+#     delta_i_pdf = (1 / (n_sym * a_c)) * (1 - e_c * cos(f_sep)) * cos(u_sep) * dv_N
+#     delta_Om_pdf = (1 / (n_sym * a_c * sin(i_c))) * (1 - e_c * cos(f_sep)) * sin(u_sep) * dv_N
+#     term_w_inplane = (1 / e_c) * (-cos(f_sep) * dv_R + (2 - e_c * cos(f_sep)) * sin(f_sep) * dv_T)
+#     term_w_outplane = (1 / sin(i_c)) * (1 - e_c * cos(f_sep)) * sin(u_sep) * cos(i_c) * dv_N
+#     delta_w_pdf = (1 / (n_sym * a_c)) * (term_w_inplane - term_w_outplane)
+#     delta_M_pdf = (1 / (n_sym * a_c * e_c)) * ((cos(f_sep) - 2*e_c) * dv_R - (2 - e_c * cos(f_sep)) * sin(f_sep) * dv_T)
+
+#     # -------------------------------------------------------
+#     # 5. Deputyの軌道要素 & 初期ROE計算
+#     # -------------------------------------------------------
+#     ac0, ec0, ic0, wc0, Omc0, Mc0 = a_c, e_c, i_c, omega_c, Omega_c, M_c
+#     ad0, ed0, id0, wd0, Omd0, Md0 = ac0 + delta_a_pdf, ec0 + delta_e_pdf, ic0 + delta_i_pdf, wc0 + delta_w_pdf, Omc0 + delta_Om_pdf, Mc0 + delta_M_pdf
+    
+#     roe_da = (ad0 - ac0) / ac0
+#     dM, dw, dOm = Md0 - Mc0, wd0 - wc0, Omd0 - Omc0
+#     roe_dl = dM + dw + dOm * cos(ic0)
+#     roe_dex = ed0 * cos(wd0) - ec0 * cos(wc0)
+#     roe_dey = ed0 * sin(wd0) - ec0 * sin(wc0)
+#     roe_dix = id0 - ic0
+#     roe_diy = dOm * sin(ic0)
+    
+#     roe_vec_0 = [roe_da, roe_dl, roe_dex, roe_dey, roe_dix, roe_diy, dB_sym]
+
+#     # -------------------------------------------------------
+#     # 6. STMによる伝播
+#     # -------------------------------------------------------
+#     omega_dot_sym, Omega_dot_sym = get_secular_j2_rates_koenig(a_c, e_c, i_c)
+#     omega_c_tf = omega_c + omega_dot_sym * t_tgt
+#     J_t0 = get_J_qns_augmented_koenig(omega_c)
+#     J_tf_inv = get_J_qns_inv_augmented_koenig(omega_c_tf)
+#     A_kep, A_j2, A_drag = get_A_prime_qns_augmented_koenig_selectable(a_c, e_c, i_c, omega_c, true, true, DENSITY_MODEL_SPECIFIC, rho_sym, Bc_sym)
+#     STM = get_STM_prime_qns_augmented_koenig_model_selectable(A_kep, A_j2, A_drag, t_tgt, e_c, true, DENSITY_MODEL_SPECIFIC)
+    
+#     roe_vec_f = J_tf_inv * STM * J_t0 * roe_vec_0
+#     roe_names = ["δa", "δλ", "δex", "δey", "δix", "δiy"]
+
+#     # -------------------------------------------------------
+#     # 7. 数値評価用辞書
+#     # -------------------------------------------------------
+#     n_val = sqrt(mu_earth / a_c_stm_init^3)
+#     t_tgt_val = PROPAGATION_ORBITS * 2 * pi / n_val
+    
+#     val_dict = Dict(
+#         dv_nom => abs(nominal_dv_T), theta_nom => pi/2, u_nom => deg2rad(90.0), # u=90度(極)　
+#         # theta_nom => 5*pi/8, u_nom => deg2rad(0.0),# 比較用　
+#         a_c => a_c_stm_init, e_c => e_c_stm_init, i_c => i_c_stm_init, omega_c => omega_c_stm_init, M_c => M_c_stm_init,
+#         t_tgt => t_tgt_val, rho_sym => RHO_LEO, Bc_sym => BC_CHIEF, dB_sym => DELTA_B_INIT,
+#         d_dv => 0, d_theta => 0, d_psi => 0, d_u => 0
+#     )
+
+#     # -------------------------------------------------------
+#     # 8. 感度解析実行 & データ収集
+#     # -------------------------------------------------------
+#     error_vars = [d_dv, d_theta, d_psi, d_u]
+#     sigmas     = [sigma_dv, sigma_theta, sigma_psi, sigma_u]
+#     error_labels = ["Δv誤差", "位相誤差", "軸倒れ", "位置誤差"]
+    
+#     all_contributions = []
+
+#     println("\n[感度解析結果 (PDF式(5)ベース)]")
+#     for i in 1:6
+#         println("-"^40)
+#         expr = roe_vec_f[i]
+#         total_variance = 0.0
+#         contributions = []
+
+#         for (j, err_var) in enumerate(error_vars)
+#             diff_expr = Symbolics.derivative(expr, err_var)
+#             sens_sym = substitute(diff_expr, val_dict)
+            
+#             sens_val = 0.0
+#             try
+#                 sens_val = Float64(Symbolics.value(sens_sym))
+#             catch
+#                 sens_val = 0.0
+#             end
+            
+#             # ★★★ 修正: ここで a_c を掛けてメートル単位に変換する ★★★
+#             contribution_meters = abs(sens_val) * sigmas[j] * a_c_stm_init
+            
+#             total_variance += contribution_meters^2
+            
+#             push!(contributions, (error_labels[j], sens_val, contribution_meters))
+#         end
+        
+#         push!(all_contributions, contributions)
+        
+#         total_sigma = sqrt(total_variance)
+#         @printf "■ 最終 %s 誤差 (1σ): %.3e [m]\n" roe_names[i] total_sigma
+        
+#         sort!(contributions, by = x -> x[3], rev=true)
+#         for (label, sens, cont) in contributions
+#             if cont > 1e-12
+#                 ratio = (cont^2 / total_variance) * 100
+#                 @printf "  - %s: 寄与 %.2e [m] (%.1f%%)\n" label cont ratio
+#             end
+#         end
+#     end
+#     println("\n" * "="^60)
+    
+#     # --- 9. グラフ作成 ---
+#     plot_sensitivity_contribution(all_contributions)
+# end
+
 # ==============================================================================
-# 「地球周回低軌道における超小型スターシェード衛星システムの編隊維持に必要な速度調整量」式(5)の近似GVEを用いた感度解析
+# [修正版] 感度解析: 数式の簡略化と表示改善 (強制表示版)
 # ==============================================================================
 function run_symbolic_sensitivity_analysis_pdf_eq5(nominal_dv_T::Float64)
     println("\n" * "="^60)
-    println("PDF式(5) [近似GVE] による感度解析 & 可視化")
+    println("感度解析: 時間依存性(t)の抽出と数値感度係数の算出 (表示改善版)")
     println("="^60)
 
     # --- 1. 誤差の設定 ---
@@ -2811,9 +3109,6 @@ function run_symbolic_sensitivity_analysis_pdf_eq5(nominal_dv_T::Float64)
     sigma_theta = deg2rad(1.0)
     sigma_psi   = deg2rad(1.0)
     sigma_u     = deg2rad(0.1)
-
-    println("[設定誤差標準偏差 (1σ)]")
-    @printf "  Δv誤差: %.3e [m/s], 位相: %.3f [deg], 軸: %.3f [deg], 位置: %.3f [deg]\n" sigma_dv rad2deg(sigma_theta) rad2deg(sigma_psi) rad2deg(sigma_u)
 
     # -------------------------------------------------------
     # 2. 変数定義
@@ -2834,23 +3129,25 @@ function run_symbolic_sensitivity_analysis_pdf_eq5(nominal_dv_T::Float64)
     dv_N = v_mag * sin(ps)
     
     # -------------------------------------------------------
-    # 4. PDF式(5) による Δα の計算 (近似GVE)
+    # 4. 近似GVE (PDF式5)
     # -------------------------------------------------------
     u_sep = u_nom + d_u
     f_sep = u_sep - omega_c
     n_sym = sqrt(mu_earth / a_c^3)
     
-    delta_a_pdf = (2 / n_sym) * (e_c * sin(f_sep) * dv_R + (1 + e_c * cos(f_sep)) * dv_T)
-    delta_e_pdf = (1 / (n_sym * a_c)) * (sin(f_sep) * dv_R + ((2 - e_c * cos(f_sep)) + e_c) * dv_T)
-    delta_i_pdf = (1 / (n_sym * a_c)) * (1 - e_c * cos(f_sep)) * cos(u_sep) * dv_N
-    delta_Om_pdf = (1 / (n_sym * a_c * sin(i_c))) * (1 - e_c * cos(f_sep)) * sin(u_sep) * dv_N
-    term_w_inplane = (1 / e_c) * (-cos(f_sep) * dv_R + (2 - e_c * cos(f_sep)) * sin(f_sep) * dv_T)
-    term_w_outplane = (1 / sin(i_c)) * (1 - e_c * cos(f_sep)) * sin(u_sep) * cos(i_c) * dv_N
-    delta_w_pdf = (1 / (n_sym * a_c)) * (term_w_inplane - term_w_outplane)
-    delta_M_pdf = (1 / (n_sym * a_c * e_c)) * ((cos(f_sep) - 2*e_c) * dv_R - (2 - e_c * cos(f_sep)) * sin(f_sep) * dv_T)
+    delta_a_pdf = (2.0 / n_sym) * (e_c * sin(f_sep) * dv_R + (1.0 + e_c * cos(f_sep)) * dv_T)
+    delta_e_pdf = (1.0 / (n_sym * a_c)) * (sin(f_sep) * dv_R + ((2.0 - e_c * cos(f_sep)) + e_c) * dv_T)
+    delta_i_pdf = (1.0 / (n_sym * a_c)) * (1.0 - e_c * cos(f_sep)) * cos(u_sep) * dv_N
+    delta_Om_pdf = (1.0 / (n_sym * a_c * sin(i_c))) * (1.0 - e_c * cos(f_sep)) * sin(u_sep) * dv_N
+    
+    term_w_inplane = (1.0 / e_c) * (-cos(f_sep) * dv_R + (2.0 - e_c * cos(f_sep)) * sin(f_sep) * dv_T)
+    term_w_outplane = (1.0 / sin(i_c)) * (1.0 - e_c * cos(f_sep)) * sin(u_sep) * cos(i_c) * dv_N
+    delta_w_pdf = (1.0 / (n_sym * a_c)) * (term_w_inplane - term_w_outplane)
+    
+    delta_M_pdf = (1.0 / (n_sym * a_c * e_c)) * ((cos(f_sep) - 2.0*e_c) * dv_R - (2.0 - e_c * cos(f_sep)) * sin(f_sep) * dv_T)
 
     # -------------------------------------------------------
-    # 5. Deputyの軌道要素 & 初期ROE計算
+    # 5. 初期ROE計算
     # -------------------------------------------------------
     ac0, ec0, ic0, wc0, Omc0, Mc0 = a_c, e_c, i_c, omega_c, Omega_c, M_c
     ad0, ed0, id0, wd0, Omd0, Md0 = ac0 + delta_a_pdf, ec0 + delta_e_pdf, ic0 + delta_i_pdf, wc0 + delta_w_pdf, Omc0 + delta_Om_pdf, Mc0 + delta_M_pdf
@@ -2884,66 +3181,459 @@ function run_symbolic_sensitivity_analysis_pdf_eq5(nominal_dv_T::Float64)
     n_val = sqrt(mu_earth / a_c_stm_init^3)
     t_tgt_val = PROPAGATION_ORBITS * 2 * pi / n_val
     
-    val_dict = Dict(
-        dv_nom => abs(nominal_dv_T), theta_nom => pi/2, u_nom => deg2rad(90.0), # u=90度(極)　
-        # theta_nom => 5*pi/8, u_nom => deg2rad(0.0),# 比較用　
+    # 定数辞書 (t_tgt と 誤差変数 は除く)
+    const_dict = Dict(
+        dv_nom => abs(nominal_dv_T), theta_nom => pi/2, u_nom => deg2rad(90.0), 
         a_c => a_c_stm_init, e_c => e_c_stm_init, i_c => i_c_stm_init, omega_c => omega_c_stm_init, M_c => M_c_stm_init,
-        t_tgt => t_tgt_val, rho_sym => RHO_LEO, Bc_sym => BC_CHIEF, dB_sym => DELTA_B_INIT,
-        d_dv => 0, d_theta => 0, d_psi => 0, d_u => 0
+        rho_sym => RHO_LEO, Bc_sym => BC_CHIEF, dB_sym => DELTA_B_INIT
     )
+    
+    full_dict = merge(const_dict, Dict(t_tgt => t_tgt_val, d_dv => 0.0, d_theta => 0.0, d_psi => 0.0, d_u => 0.0))
 
     # -------------------------------------------------------
-    # 8. 感度解析実行 & データ収集
+    # 8. 感度解析 & 表示
     # -------------------------------------------------------
     error_vars = [d_dv, d_theta, d_psi, d_u]
     sigmas     = [sigma_dv, sigma_theta, sigma_psi, sigma_u]
     error_labels = ["Δv誤差", "位相誤差", "軸倒れ", "位置誤差"]
+    error_units = ["[m/s]", "[rad]", "[rad]", "[rad]"]
     
     all_contributions = []
 
-    println("\n[感度解析結果 (PDF式(5)ベース)]")
+    println("\n[感度解析結果: 数値係数と時間依存性]")
+    
     for i in 1:6
         println("-"^40)
+        println("■ 最終 $(roe_names[i])")
         expr = roe_vec_f[i]
-        total_variance = 0.0
+        
         contributions = []
+        total_variance = 0.0
 
         for (j, err_var) in enumerate(error_vars)
             diff_expr = Symbolics.derivative(expr, err_var)
-            sens_sym = substitute(diff_expr, val_dict)
             
+            # 数値感度
             sens_val = 0.0
             try
+                sens_sym = substitute(diff_expr, full_dict)
                 sens_val = Float64(Symbolics.value(sens_sym))
             catch
                 sens_val = 0.0
             end
             
-            # ★★★ 修正: ここで a_c を掛けてメートル単位に変換する ★★★
-            contribution_meters = abs(sens_val) * sigmas[j] * a_c_stm_init
-            
+            slope_meters = sens_val * a_c_stm_init
+            contribution_meters = abs(slope_meters) * sigmas[j]
             total_variance += contribution_meters^2
             
-            push!(contributions, (error_labels[j], sens_val, contribution_meters))
+            # 時間依存性の表示
+            time_func_str = "N/A"
+            try
+                # 定数代入
+                zero_error_dict = Dict(d_dv => 0.0, d_theta => 0.0, d_psi => 0.0, d_u => 0.0)
+                combined_dict = merge(const_dict, zero_error_dict)
+                time_func_sym = substitute(diff_expr, combined_dict)
+                
+                # 数値を丸めて文字列化するための簡易処理
+                # (正規表現などで長い小数を短くする)
+                raw_str = string(time_func_sym)
+                
+                # 非常に長い式の場合、主要項だけを取り出すのは難しいが、
+                # そのまま表示してユーザーに判断させる
+                time_func_str = raw_str
+            catch
+            end
+            
+            push!(contributions, (error_labels[j], slope_meters, contribution_meters, time_func_str))
         end
-        
-        push!(all_contributions, contributions)
-        
-        total_sigma = sqrt(total_variance)
-        @printf "■ 最終 %s 誤差 (1σ): %.3e [m]\n" roe_names[i] total_sigma
         
         sort!(contributions, by = x -> x[3], rev=true)
-        for (label, sens, cont) in contributions
+        
+        for (label, slope, cont, time_func) in contributions
             if cont > 1e-12
-                ratio = (cont^2 / total_variance) * 100
-                @printf "  - %s: 寄与 %.2e [m] (%.1f%%)\n" label cont ratio
+                @printf "  ・%s:\n" label
+                @printf "      数値感度: %.2e [m / %s]\n" slope (error_units[findfirst(==(label), error_labels)])
+                @printf "      寄与(1σ): %.2e [m]\n" cont
+                
+                # ★修正: 長さ制限を撤廃し、改行して表示
+                println("      時間依存式:")
+                # 長すぎる場合は適当に改行を入れるなどの処理があってもいいが、まずは生で表示
+                if length(time_func) > 1000
+                     println("      (式が極めて長いため先頭のみ表示): ", time_func[1:200], "...")
+                else
+                     println("      ", time_func)
+                end
             end
         end
+        
+        # グラフ用データ
+        graph_data = []
+        for (label, slope, cont, _) in contributions
+             push!(graph_data, (label, 0.0, cont, "")) 
+        end
+        push!(all_contributions, graph_data)
     end
     println("\n" * "="^60)
     
-    # --- 9. グラフ作成 ---
     plot_sensitivity_contribution(all_contributions)
+end
+
+# # ==============================================================================
+# # [修正版] 指定ドリフト量達成のためのΔv逆算と安全性確認 (レイアウト調整版)
+# # ==============================================================================
+# function run_drift_design_simulation()
+#     println("\n" * "="^60)
+#     println("指定ドリフト量達成のためのΔv逆算と時刻歴シミュレーション (レイアウト調整版)")
+#     println("="^60)
+
+#     # --- 1. 目標の設定 ---
+#     target_dlambda_meters = 50.0   
+#     target_time_days = 1.0         
+    
+#     # 安全確保のための半径方向分離速度
+#     dv_R_input = 0.00 # [m/s] 
+    
+#     target_time_sec = target_time_days * 86400.0
+#     println("条件:")
+#     println("  到達時間: $target_time_days [day] ($target_time_sec sec)")
+#     println("  目標δλ  : $target_dlambda_meters [m]")
+#     println("  追加ΔvR : $dv_R_input [m/s]")
+
+#     # --- 2. パラメータ準備 ---
+#     n_init = sqrt(mu_earth / a_c_stm_init^3)
+#     oe_c = OrbitalElementsClassical(a_c_stm_init, e_c_stm_init, i_c_stm_init, Omega_c_stm_init, omega_c_stm_init, 0.0, n_init, M_c_stm_init)
+#     rho = RHO_LEO; Bc = BC_CHIEF; dB = DELTA_B_INIT
+
+#     # --- 3. STMを用いたΔvTの逆算 ---
+#     omega_c_t0 = oe_c.omega
+#     omega_dot, Omega_dot = get_secular_j2_rates_koenig(oe_c.a, oe_c.e, oe_c.i)
+#     omega_c_tf = omega_c_t0 + omega_dot * target_time_sec
+    
+#     J_t0 = get_J_qns_augmented_koenig(omega_c_t0)
+#     J_tf_inv = get_J_qns_inv_augmented_koenig(omega_c_tf)
+#     A_kep, A_j2, A_drag = get_A_prime_qns_augmented_koenig_selectable(oe_c.a, oe_c.e, oe_c.i, omega_c_t0, true, true, DENSITY_MODEL_SPECIFIC, rho, Bc)
+#     STM = get_STM_prime_qns_augmented_koenig_model_selectable(A_kep, A_j2, A_drag, target_time_sec, oe_c.e, true, DENSITY_MODEL_SPECIFIC)
+#     M_trans = J_tf_inv * STM * J_t0
+
+#     u_0 = oe_c.M + oe_c.omega 
+#     C_gve = 1.0 / (oe_c.n * oe_c.a)
+    
+#     da_from_R  = 0.0
+#     dl_from_R  = -2 * C_gve * dv_R_input
+#     dex_from_R = C_gve * sin(u_0) * dv_R_input
+#     dey_from_R = -C_gve * cos(u_0) * dv_R_input
+    
+#     term_drift_drag = M_trans[2,7] * dB
+#     term_drift_R = M_trans[2,2]*dl_from_R + M_trans[2,3]*dex_from_R + M_trans[2,4]*dey_from_R
+#     term_coeff_T = M_trans[2,1]*(2*C_gve) + M_trans[2,3]*(2*C_gve*cos(u_0)) + M_trans[2,4]*(2*C_gve*sin(u_0))
+    
+#     target_dl_rad = target_dlambda_meters / oe_c.a
+#     req_dv_T = (target_dl_rad - term_drift_R - term_drift_drag) / term_coeff_T
+    
+#     println("\n逆算結果:")
+#     println("  必要な分離速度 ΔvT: $(req_dv_T) [m/s] ($(req_dv_T*1000) mm/s)")
+
+#     # --- 4. 時刻歴シミュレーション ---
+#     println("\nシミュレーション実行中...")
+    
+#     da_0  = 2*C_gve*req_dv_T
+#     dl_0  = -2*C_gve*dv_R_input
+#     dex_0 = C_gve*(sin(u_0)*dv_R_input + 2*cos(u_0)*req_dv_T)
+#     dey_0 = C_gve*(-cos(u_0)*dv_R_input + 2*sin(u_0)*req_dv_T)
+#     roe_0 = SVector(da_0, dl_0, dex_0, dey_0, 0.0, 0.0, dB)
+    
+#     times = 0:60:target_time_sec
+#     hist_t = Float64[]
+#     hist_dl = Float64[]
+#     hist_dist = Float64[] 
+#     hist_x = Float64[]
+#     hist_y = Float64[]
+#     hist_z = Float64[]
+    
+#     min_dist = Inf
+#     min_dist_time = 0.0
+    
+#     for t in times
+#         omega_c_curr = omega_c_t0 + omega_dot * t
+#         J_inv_curr = get_J_qns_inv_augmented_koenig(omega_c_curr)
+#         STM_curr = get_STM_prime_qns_augmented_koenig_model_selectable(
+#             A_kep, A_j2, A_drag, t, oe_c.e, true, DENSITY_MODEL_SPECIFIC
+#         )
+#         roe_curr = J_inv_curr * STM_curr * J_t0 * roe_0
+        
+#         current_RAAN = mod(oe_c.RAAN + Omega_dot * t, 2*pi)
+#         current_omega = mod(oe_c.omega + omega_dot * t, 2*pi)
+#         current_M     = mod(oe_c.M + oe_c.n * t, 2*pi)
+        
+#         oe_c_curr = OrbitalElementsClassical(oe_c.a, oe_c.e, oe_c.i, current_RAAN, current_omega, 0.0, oe_c.n, current_M)
+#         oe_d_curr = final_roe_to_deputy_oe(oe_c_curr, roe_curr)
+        
+#         sv_c_vec = orbital_elements_to_sv(oe_c_curr)
+#         sv_d_vec = orbital_elements_to_sv(oe_d_curr)
+        
+#         r_c_eci = SVector(sv_c_vec[1], sv_c_vec[2], sv_c_vec[3])
+#         v_c_eci = SVector(sv_c_vec[4], sv_c_vec[5], sv_c_vec[6])
+#         r_d_eci = SVector(sv_d_vec[1], sv_d_vec[2], sv_d_vec[3])
+        
+#         dr_eci = r_d_eci - r_c_eci
+#         dr_rtn = eci_to_rtn(r_c_eci, v_c_eci, dr_eci)
+        
+#         dist = norm(dr_rtn)
+        
+#         push!(hist_t, t/86400.0)
+#         push!(hist_dl, roe_curr[2] * oe_c.a)
+#         push!(hist_dist, dist)
+#         push!(hist_x, dr_rtn[1])
+#         push!(hist_y, dr_rtn[2])
+#         push!(hist_z, dr_rtn[3])
+        
+#         if dist < min_dist
+#             min_dist = dist
+#             min_dist_time = t
+#         end
+#     end
+    
+#     println("\n安全性評価:")
+#     println("  最小接近距離: $(min_dist) [m] (at $(min_dist_time/60) min)")
+
+#     # --- 5. プロット作成 ---
+#     # レイアウト調整設定
+#     default(
+#         dpi=300, 
+#         guidefontsize=10, 
+#         tickfontsize=8, 
+#         legendfontsize=8, 
+#         titlefontsize=10,
+#         margin=10Plots.mm # 全体の余白を確保
+#     )
+    
+#     # グラフ1: δλ
+#     p1 = plot(hist_t, hist_dl, label="δλ", 
+#         xlabel="Time [days]", ylabel="δλ [m]", title="Along-Track Drift", lw=2, legend=:topleft)
+#     scatter!(p1, [target_time_days], [target_dlambda_meters], label="Target", marker=:diamond, color=:red)
+    
+#     # グラフ2: 相対距離 (ライン削除済み)
+#     p2 = plot(hist_t, hist_dist, label="3D Distance", 
+#         xlabel="Time [days]", ylabel="Distance [m]", title="Relative Distance", lw=2, color=:green, legend=:topleft)
+
+#     # グラフ3: RT面内軌跡 (全期間プロットへ変更)
+#     p3 = plot(hist_y, hist_x, 
+#         xlabel="Along-Track (y) [m]", ylabel="Radial (x) [m]", 
+#         title="RT-Plane Trajectory", aspect_ratio=:equal, lw=1.5, legend=:topright)
+#     # Chiefマーカー削除済み
+    
+#     # グラフ4: Z軸 (全期間プロットへ変更)
+#     p4 = plot(hist_t, hist_z,
+#         xlabel="Time [days]", ylabel="Cross-Track (z) [m]",
+#         title="Cross-Track Motion", lw=1.5, color=:purple, legend=:topright)
+
+#     # レイアウト配置
+#     p_combined = plot(p1, p2, p3, p4, layout=(2,2), size=(1000, 800))
+    
+#     timestamp = Dates.format(now(), "yyyy-mm-dd_HH-MM-SS")
+#     filename = "drift_safety_check_layout_$(timestamp).png"
+#     savefig(p_combined, filename)
+#     println("グラフを保存しました: $filename")
+#     display(p_combined)
+# end
+
+# ==============================================================================
+# [修正版] 指定ドリフト量シミュレーション (バイアス補正付き完全版)
+# ==============================================================================
+function run_drift_design_simulation()
+    println("\n" * "="^60)
+    println("指定ドリフト量達成のためのΔv逆算と時刻歴シミュレーション (バイアス補正版)")
+    println("="^60)
+
+    # --- 1. 目標の設定 ---
+    target_dlambda_meters = -50.0   
+    target_time_days = 1.0         
+    dv_R_input = 0.0 # [m/s] 
+    
+    target_time_sec = target_time_days * 86400.0
+
+    # --- 2. パラメータ準備 ---
+    n_init = sqrt(mu_earth / a_c_stm_init^3)
+    oe_c = OrbitalElementsClassical(a_c_stm_init, e_c_stm_init, i_c_stm_init, Omega_c_stm_init, omega_c_stm_init, 0.0, n_init, M_c_stm_init)
+    rho = RHO_LEO; Bc = BC_CHIEF; dB = DELTA_B_INIT
+
+    # --- 3. STMを用いたΔvTの逆算 ---
+    omega_c_t0 = oe_c.omega
+    omega_dot, Omega_dot = get_secular_j2_rates_koenig(oe_c.a, oe_c.e, oe_c.i)
+    omega_c_tf = omega_c_t0 + omega_dot * target_time_sec
+    
+    J_t0 = get_J_qns_augmented_koenig(omega_c_t0)
+    J_tf_inv = get_J_qns_inv_augmented_koenig(omega_c_tf)
+    A_kep, A_j2, A_drag = get_A_prime_qns_augmented_koenig_selectable(oe_c.a, oe_c.e, oe_c.i, omega_c_t0, true, true, DENSITY_MODEL_SPECIFIC, rho, Bc)
+    STM = get_STM_prime_qns_augmented_koenig_model_selectable(A_kep, A_j2, A_drag, target_time_sec, oe_c.e, true, DENSITY_MODEL_SPECIFIC)
+    M_trans = J_tf_inv * STM * J_t0
+
+    u_0 = oe_c.M + oe_c.omega 
+    C_gve = 1.0 / (oe_c.n * oe_c.a)
+    
+    da_from_R  = 0.0
+    dl_from_R  = -2 * C_gve * dv_R_input
+    dex_from_R = C_gve * sin(u_0) * dv_R_input
+    dey_from_R = -C_gve * cos(u_0) * dv_R_input
+    
+    term_drift_drag = M_trans[2,7] * dB
+    term_drift_R = M_trans[2,2]*dl_from_R + M_trans[2,3]*dex_from_R + M_trans[2,4]*dey_from_R
+    term_coeff_T = M_trans[2,1]*(2*C_gve) + M_trans[2,3]*(2*C_gve*cos(u_0)) + M_trans[2,4]*(2*C_gve*sin(u_0))
+    
+    target_dl_rad = target_dlambda_meters / oe_c.a
+    req_dv_T = (target_dl_rad - term_drift_R - term_drift_drag) / term_coeff_T
+    
+    println("\n[逆算結果]")
+    println("  必要な分離速度 ΔvT: $(req_dv_T) [m/s]")
+
+    # --- 初期状態 (t=0) の計算 ---
+    da_0  = 2*C_gve*req_dv_T
+    dl_0  = -2*C_gve*dv_R_input
+    dex_0 = C_gve*(sin(u_0)*dv_R_input + 2*cos(u_0)*req_dv_T)
+    dey_0 = C_gve*(-cos(u_0)*dv_R_input + 2*sin(u_0)*req_dv_T)
+    roe_0 = SVector(da_0, dl_0, dex_0, dey_0, 0.0, 0.0, dB)
+
+    oe_d_0 = final_roe_to_deputy_oe(oe_c, roe_0)
+    
+    sv_c_0 = orbital_elements_to_sv(oe_c)
+    sv_d_0 = orbital_elements_to_sv(oe_d_0)
+    
+    r_c_0 = SVector(sv_c_0[1], sv_c_0[2], sv_c_0[3])
+    v_c_0 = SVector(sv_c_0[4], sv_c_0[5], sv_c_0[6])
+    r_d_0 = SVector(sv_d_0[1], sv_d_0[2], sv_d_0[3])
+    v_d_0 = SVector(sv_d_0[4], sv_d_0[5], sv_d_0[6])
+    
+    dr_eci_0 = r_d_0 - r_c_0
+    dv_eci_0 = v_d_0 - v_c_0
+    
+    dr_rtn_0 = eci_to_rtn(r_c_0, v_c_0, dr_eci_0)
+    
+    # ★バイアス補正用: 初期位置ズレを記録
+    bias_offset = dr_rtn_0
+    
+    dv_rtn_0_inertial = eci_to_rtn(r_c_0, v_c_0, dv_eci_0)
+
+    # Hill速度
+    h_vec_0 = cross(r_c_0, v_c_0)
+    omega_vec_eci = h_vec_0 / dot(r_c_0, r_c_0)
+    omega_norm = norm(omega_vec_eci)
+    vx_hill_0 = dv_rtn_0_inertial[1] + omega_norm * dr_rtn_0[2]
+    vy_hill_0 = dv_rtn_0_inertial[2] - omega_norm * dr_rtn_0[1]
+    vz_hill_0 = dv_rtn_0_inertial[3]
+
+    println("\n--- [Start] 初期状態 (t = 0.0 days) ---")
+    # 表示上はバイアス補正後の値（理論値 0）を表示
+    println("  相対位置 (RTN, Bias Corrected) [m]:")
+    @printf "    R (x): %10.4f\n" (dr_rtn_0[1] - bias_offset[1])
+    @printf "    T (y): %10.4f\n" (dr_rtn_0[2] - bias_offset[2])
+    @printf "    N (z): %10.4f\n" (dr_rtn_0[3] - bias_offset[3])
+    println("  (補正前生データ: $(dr_rtn_0))")
+    println("  相対速度 (RTN: 慣性速度差) [m/s]:")
+    @printf "    vR:    %10.6f\n" dv_rtn_0_inertial[1]
+    @printf "    vT:    %10.6f\n" dv_rtn_0_inertial[2]
+    @printf "    vN:    %10.6f\n" dv_rtn_0_inertial[3]
+
+    # --- 4. 時刻歴シミュレーション ---
+    times = 0:60:target_time_sec
+    hist_t = Float64[]
+    hist_dl = Float64[]
+    hist_dist = Float64[] 
+    hist_x = Float64[]; hist_y = Float64[]; hist_z = Float64[]
+    
+    for t in times
+        omega_c_curr = omega_c_t0 + omega_dot * t
+        J_inv_curr = get_J_qns_inv_augmented_koenig(omega_c_curr)
+        STM_curr = get_STM_prime_qns_augmented_koenig_model_selectable(A_kep, A_j2, A_drag, t, oe_c.e, true, DENSITY_MODEL_SPECIFIC)
+        roe_curr = J_inv_curr * STM_curr * J_t0 * roe_0
+        
+        current_RAAN = mod(oe_c.RAAN + Omega_dot * t, 2*pi)
+        current_omega = mod(oe_c.omega + omega_dot * t, 2*pi)
+        current_M     = mod(oe_c.M + oe_c.n * t, 2*pi)
+        
+        oe_c_curr = OrbitalElementsClassical(oe_c.a, oe_c.e, oe_c.i, current_RAAN, current_omega, 0.0, oe_c.n, current_M)
+        oe_d_curr = final_roe_to_deputy_oe(oe_c_curr, roe_curr)
+        
+        sv_c_vec = orbital_elements_to_sv(oe_c_curr)
+        sv_d_vec = orbital_elements_to_sv(oe_d_curr)
+        
+        r_c_eci = SVector(sv_c_vec[1], sv_c_vec[2], sv_c_vec[3])
+        v_c_eci = SVector(sv_c_vec[4], sv_c_vec[5], sv_c_vec[6])
+        r_d_eci = SVector(sv_d_vec[1], sv_d_vec[2], sv_d_vec[3])
+        
+        dr_eci = r_d_eci - r_c_eci
+        dr_rtn_raw = eci_to_rtn(r_c_eci, v_c_eci, dr_eci)
+        
+        # ★バイアス補正: 初期ズレ分を差し引く
+        dr_rtn = dr_rtn_raw - bias_offset
+        
+        dist = norm(dr_rtn)
+        
+        push!(hist_t, t/86400.0)
+        push!(hist_dl, roe_curr[2] * oe_c.a)
+        push!(hist_dist, dist)
+        push!(hist_x, dr_rtn[1]); push!(hist_y, dr_rtn[2]); push!(hist_z, dr_rtn[3])
+    end
+    
+    # --- 終了状態 ---
+    t_final = times[end]
+    omega_c_final = omega_c_t0 + omega_dot * t_final
+    J_inv_final = get_J_qns_inv_augmented_koenig(omega_c_final)
+    STM_final = get_STM_prime_qns_augmented_koenig_model_selectable(A_kep, A_j2, A_drag, t_final, oe_c.e, true, DENSITY_MODEL_SPECIFIC)
+    roe_final = J_inv_final * STM_final * J_t0 * roe_0
+
+    current_RAAN_f = mod(oe_c.RAAN + Omega_dot * t_final, 2*pi)
+    current_omega_f = mod(oe_c.omega + omega_dot * t_final, 2*pi)
+    current_M_f     = mod(oe_c.M + oe_c.n * t_final, 2*pi)
+    oe_c_f = OrbitalElementsClassical(oe_c.a, oe_c.e, oe_c.i, current_RAAN_f, current_omega_f, 0.0, oe_c.n, current_M_f)
+    oe_d_f = final_roe_to_deputy_oe(oe_c_f, roe_final)
+    
+    sv_c_f = orbital_elements_to_sv(oe_c_f); sv_d_f = orbital_elements_to_sv(oe_d_f)
+    
+    r_c_f = SVector(sv_c_f[1], sv_c_f[2], sv_c_f[3])
+    v_c_f = SVector(sv_c_f[4], sv_c_f[5], sv_c_f[6])
+    r_d_f = SVector(sv_d_f[1], sv_d_f[2], sv_d_f[3])
+    v_d_f = SVector(sv_d_f[4], sv_d_f[5], sv_d_f[6])
+    
+    dr_f = r_d_f - r_c_f
+    dv_f = v_d_f - v_c_f
+    dr_rtn_f_raw = eci_to_rtn(r_c_f, v_c_f, dr_f)
+    
+    # ★ここでも補正
+    dr_rtn_f = dr_rtn_f_raw - bias_offset
+    
+    dv_rtn_f_inertial = eci_to_rtn(r_c_f, v_c_f, dv_f)
+    
+    h_vec_f = cross(r_c_f, v_c_f)
+    omega_norm_f = norm(h_vec_f) / dot(r_c_f, r_c_f)
+    vx_hill_f = dv_rtn_f_inertial[1] + omega_norm_f * dr_rtn_f[2]
+    vy_hill_f = dv_rtn_f_inertial[2] - omega_norm_f * dr_rtn_f[1]
+    vz_hill_f = dv_rtn_f_inertial[3]
+
+    println("\n--- [End] 終了状態 (t = $(round(t_final/86400.0, digits=2)) days) ---")
+    println("  相対位置 (RTN, Bias Corrected) [m]:")
+    @printf "    R (x): %10.4f\n" dr_rtn_f[1]
+    @printf "    T (y): %10.4f\n" dr_rtn_f[2]
+    @printf "    N (z): %10.4f\n" dr_rtn_f[3]
+    println("  相対速度 (RTN: 慣性速度差) [m/s]:")
+    @printf "    vR:    %10.6f\n" dv_rtn_f_inertial[1]
+    @printf "    vT:    %10.6f\n" dv_rtn_f_inertial[2]
+    @printf "    vN:    %10.6f\n" dv_rtn_f_inertial[3]
+    println("="^60)
+
+    # --- プロット作成 (変更なし) ---
+    default(dpi=300, guidefontsize=10, tickfontsize=8, legendfontsize=8, titlefontsize=10, margin=10Plots.mm)
+    p1 = plot(hist_t, hist_dl, label="δλ", xlabel="Time [days]", ylabel="δλ [m]", title="Along-Track Drift", lw=2, legend=:topleft)
+    scatter!(p1, [target_time_days], [target_dlambda_meters], label="Target", marker=:diamond, color=:red)
+    p2 = plot(hist_t, hist_dist, label="3D Distance", xlabel="Time [days]", ylabel="Distance [m]", title="Relative Distance", lw=2, color=:green, legend=:topleft)
+    p3 = plot(hist_y, hist_x, xlabel="Along-Track (y) [m]", ylabel="Radial (x) [m]", title="RT-Plane Trajectory", aspect_ratio=:equal, lw=1.5, legend=:topright)
+    p4 = plot(hist_t, hist_z, xlabel="Time [days]", ylabel="Cross-Track (z) [m]", title="Cross-Track Motion", lw=1.5, color=:purple, legend=:topright)
+    p_combined = plot(p1, p2, p3, p4, layout=(2,2), size=(1000, 800))
+    
+    timestamp = Dates.format(now(), "yyyy-mm-dd_HH-MM-SS")
+    filename = "drift_simulation_strict_corrected_$(timestamp).png"
+    savefig(p_combined, filename)
+    println("グラフを保存しました: $filename")
+    display(p_combined)
 end
 
 # ==============================================================================
@@ -2959,6 +3649,8 @@ run_symbolic_sensitivity_analysis(nominal_dv_T)
 # --- 実行 ---
 run_symbolic_sensitivity_analysis_pdf_eq5(nominal_dv_T)
 
+# 依頼用
+run_drift_design_simulation()
 
 run_target_search()
 
@@ -2973,4 +3665,751 @@ analyze_attitude_requirements()
 
 run_comparison_analysis()
 
-# debug_single_correction_case()
+debug_single_correction_case()
+
+
+# 以下依頼用
+# ヘルパー関数: 状態保存
+function save_state!(ht, hdl, hda, hdist, hx, hy, hz, hphase, t, roe, oe_c, bias, phase_sym)
+    oe_d = final_roe_to_deputy_oe(oe_c, roe)
+    sv_c = orbital_elements_to_sv(oe_c); sv_d = orbital_elements_to_sv(oe_d)
+    r_c = SVector(sv_c[1], sv_c[2], sv_c[3]); v_c = SVector(sv_c[4], sv_c[5], sv_c[6])
+    r_d = SVector(sv_d[1], sv_d[2], sv_d[3])
+    dr_rtn = eci_to_rtn(r_c, v_c, r_d - r_c) - bias
+    
+    push!(ht, t)
+    push!(hdl, roe[2] * oe_c.a)
+    push!(hda, roe[1] * oe_c.a)
+    push!(hdist, norm(dr_rtn))
+    push!(hx, dr_rtn[1]); push!(hy, dr_rtn[2]); push!(hz, dr_rtn[3])
+    push!(hphase, phase_sym)
+end
+
+# # ==============================================================================
+# #  分離からδa制御収束まで
+# # ==============================================================================
+# function run_station_keeping_simulation()
+#     println("\n" * "="^60)
+#     println("分離から制御収束までの全行程シミュレーション (グラフ追加版)")
+#     println("="^60)
+
+#     # --- 0. 設定 ---
+#     target_dlambda_meters = -60.0   
+#     drift_duration_days = 1.0         
+#     dv_R_input = 0.0 
+    
+#     drift_duration_sec = drift_duration_days * 86400.0
+#     control_duration_orbits = 3.0
+
+#     # --- 1. 初期パラメータとΔv設計 ---
+#     n_init = sqrt(mu_earth / a_c_stm_init^3)
+#     oe_c_init = OrbitalElementsClassical(a_c_stm_init, e_c_stm_init, i_c_stm_init, Omega_c_stm_init, omega_c_stm_init, 0.0, n_init, M_c_stm_init)
+#     rho = RHO_LEO; Bc = BC_CHIEF; dB_natural = DELTA_B_INIT
+
+#     # ΔvTの逆算
+#     omega_c_t0 = oe_c_init.omega
+#     omega_dot, Omega_dot = get_secular_j2_rates_koenig(oe_c_init.a, oe_c_init.e, oe_c_init.i)
+#     omega_c_tf = omega_c_t0 + omega_dot * drift_duration_sec
+    
+#     J_t0 = get_J_qns_augmented_koenig(omega_c_t0)
+#     J_tf_inv = get_J_qns_inv_augmented_koenig(omega_c_tf)
+#     A_kep, A_j2, A_drag = get_A_prime_qns_augmented_koenig_selectable(oe_c_init.a, oe_c_init.e, oe_c_init.i, omega_c_t0, true, true, DENSITY_MODEL_SPECIFIC, rho, Bc)
+#     STM_drift = get_STM_prime_qns_augmented_koenig_model_selectable(A_kep, A_j2, A_drag, drift_duration_sec, oe_c_init.e, true, DENSITY_MODEL_SPECIFIC)
+#     M_trans = J_tf_inv * STM_drift * J_t0
+#     u_0 = oe_c_init.M + oe_c_init.omega 
+#     C_gve = 1.0 / (oe_c_init.n * oe_c_init.a)
+    
+#     da_from_R, dl_from_R = 0.0, -2*C_gve*dv_R_input
+#     dex_from_R, dey_from_R = C_gve*sin(u_0)*dv_R_input, -C_gve*cos(u_0)*dv_R_input
+    
+#     term_drift_drag = M_trans[2,7] * dB_natural
+#     term_drift_R = M_trans[2,2]*dl_from_R + M_trans[2,3]*dex_from_R + M_trans[2,4]*dey_from_R
+#     term_coeff_T = M_trans[2,1]*(2*C_gve) + M_trans[2,3]*(2*C_gve*cos(u_0)) + M_trans[2,4]*(2*C_gve*sin(u_0))
+    
+#     req_dv_T = (target_dlambda_meters / oe_c_init.a - term_drift_R - term_drift_drag) / term_coeff_T
+    
+#     println("設計結果:")
+#     println("  必要分離速度 ΔvT: $(req_dv_T) [m/s]")
+
+#     # --- 2. シミュレーション準備 ---
+#     da_0  = 2*C_gve*req_dv_T
+#     dl_0  = -2*C_gve*dv_R_input
+#     dex_0 = C_gve*(sin(u_0)*dv_R_input + 2*cos(u_0)*req_dv_T)
+#     dey_0 = C_gve*(-cos(u_0)*dv_R_input + 2*sin(u_0)*req_dv_T)
+#     roe_curr = SVector(da_0, dl_0, dex_0, dey_0, 0.0, 0.0, dB_natural)
+    
+#     oe_c_curr = oe_c_init
+#     current_time = 0.0
+
+#     hist_t = Float64[]
+#     hist_dl = Float64[]
+#     hist_da = Float64[]
+#     hist_dist = Float64[]
+#     hist_x = Float64[]; hist_y = Float64[]; hist_z = Float64[]
+#     hist_db = Float64[] # ★追加: δB履歴
+#     hist_phase = Symbol[] 
+
+#     # バイアス補正用の初期位置計算
+#     oe_d_0 = final_roe_to_deputy_oe(oe_c_curr, roe_curr)
+#     sv_c_0 = orbital_elements_to_sv(oe_c_curr)
+#     sv_d_0 = orbital_elements_to_sv(oe_d_0)
+    
+#     r_c_0 = SVector(sv_c_0[1], sv_c_0[2], sv_c_0[3])
+#     v_c_0 = SVector(sv_c_0[4], sv_c_0[5], sv_c_0[6])
+#     r_d_0 = SVector(sv_d_0[1], sv_d_0[2], sv_d_0[3])
+    
+#     dr_eci_0 = r_d_0 - r_c_0
+#     dr_rtn_0_raw = eci_to_rtn(r_c_0, v_c_0, dr_eci_0)
+#     bias_offset = dr_rtn_0_raw
+
+#     # ヘルパー関数: 状態保存 (δB引数を追加)
+#     function record_state!(t, roe, oe_c, bias, phase, db_val)
+#         oe_d = final_roe_to_deputy_oe(oe_c, roe)
+#         sv_c = orbital_elements_to_sv(oe_c); sv_d = orbital_elements_to_sv(oe_d)
+#         r_c = SVector(sv_c[1], sv_c[2], sv_c[3]); v_c = SVector(sv_c[4], sv_c[5], sv_c[6])
+#         r_d = SVector(sv_d[1], sv_d[2], sv_d[3])
+#         dr_rtn = eci_to_rtn(r_c, v_c, r_d - r_c) - bias
+        
+#         push!(hist_t, t)
+#         push!(hist_dl, roe[2] * oe_c.a)
+#         push!(hist_da, roe[1] * oe_c.a)
+#         push!(hist_dist, norm(dr_rtn))
+#         push!(hist_x, dr_rtn[1]); push!(hist_y, dr_rtn[2]); push!(hist_z, dr_rtn[3])
+#         push!(hist_db, db_val) # ★追加
+#         push!(hist_phase, phase)
+#     end
+
+#     # --- 3. フェーズ1: ドリフト期間 ---
+#     println("Phase 1: ドリフトシミュレーション実行中...")
+#     dt_drift = 600.0
+#     steps_drift = Int(drift_duration_sec / dt_drift)
+    
+#     for i in 1:steps_drift
+#         record_state!(current_time, roe_curr, oe_c_curr, bias_offset, :Drift, roe_curr[7])
+
+#         omega_c = oe_c_curr.omega
+#         omega_dot_step, Omega_dot_step = get_secular_j2_rates_koenig(oe_c_curr.a, oe_c_curr.e, oe_c_curr.i)
+#         omega_c_next = omega_c + omega_dot_step * dt_drift
+#         J_t0_step = get_J_qns_augmented_koenig(omega_c)
+#         J_tf_inv_step = get_J_qns_inv_augmented_koenig(omega_c_next)
+#         A_kep, A_j2, A_drag = get_A_prime_qns_augmented_koenig_selectable(oe_c_curr.a, oe_c_curr.e, oe_c_curr.i, omega_c, true, true, DENSITY_MODEL_SPECIFIC, rho, Bc)
+#         STM_step = get_STM_prime_qns_augmented_koenig_model_selectable(A_kep, A_j2, A_drag, dt_drift, oe_c_curr.e, true, DENSITY_MODEL_SPECIFIC)
+#         roe_next = J_tf_inv_step * STM_step * J_t0_step * roe_curr
+        
+#         roe_curr = SVector{7,Float64}(Float64.(roe_next))
+#         new_M = mod(oe_c_curr.M + oe_c_curr.n * dt_drift, 2*pi)
+#         new_omega = mod(oe_c_curr.omega + omega_dot_step * dt_drift, 2*pi)
+#         new_RAAN = mod(oe_c_curr.RAAN + Omega_dot_step * dt_drift, 2*pi)
+#         oe_c_curr = OrbitalElementsClassical(oe_c_curr.a, oe_c_curr.e, oe_c_curr.i, new_RAAN, new_omega, 0.0, oe_c_curr.n, new_M)
+#         current_time += dt_drift
+#     end
+
+#     println("  -> 1日後の到達地点 δλ: $(roe_curr[2] * oe_c_curr.a) [m]")
+
+#     # --- 4. フェーズ2: 制御期間 ---
+#     println("Phase 2: 定点保持制御シミュレーション実行中...")
+    
+#     control_duration_sec = control_duration_orbits * (2*pi/oe_c_curr.n)
+#     dt_control = SIM_SEGMENT_ORBITS * (2*pi/oe_c_curr.n)
+#     steps_control = Int(control_duration_sec / dt_control)
+    
+#     target_roe_control = SVector(0.0, target_dlambda_meters/oe_c_init.a, roe_curr[3], roe_curr[4], roe_curr[5], roe_curr[6], 0.0)
+#     current_delta_B = roe_curr[7]
+#     alpha = 1.0 - exp(-dt_control / ATTITUDE_CHANGE_TIMECONSTANT_SEC)
+    
+#     for i in 1:steps_control
+#         record_state!(current_time, roe_curr, oe_c_curr, bias_offset, :Control, current_delta_B)
+
+#         A_kep, A_j2, A_drag = get_A_prime_qns_augmented_koenig_selectable(oe_c_curr.a, oe_c_curr.e, oe_c_curr.i, oe_c_curr.omega, true, true, DENSITY_MODEL_SPECIFIC, rho, Bc)
+#         error_da_meters = (roe_curr[1] - target_roe_control[1]) * oe_c_curr.a
+#         GAIN = 1.5
+#         delta_B_req = error_da_meters * GAIN
+#         delta_B_command = clamp(delta_B_req, DELTA_B_MIN, DELTA_B_MAX)
+        
+#         omega_dot_step, Omega_dot_step = get_secular_j2_rates_koenig(oe_c_curr.a, oe_c_curr.e, oe_c_curr.i)
+#         omega_c_next = oe_c_curr.omega + omega_dot_step * dt_control
+#         J_t0_step = get_J_qns_augmented_koenig(oe_c_curr.omega)
+#         J_tf_inv_step = get_J_qns_inv_augmented_koenig(omega_c_next)
+#         STM_step = get_STM_prime_qns_augmented_koenig_model_selectable(A_kep, A_j2, A_drag, dt_control, oe_c_curr.e, true, DENSITY_MODEL_SPECIFIC)
+        
+#         # 入力δBを反映して伝播
+#         roe_vec_input = SVector(roe_curr[1], roe_curr[2], roe_curr[3], roe_curr[4], roe_curr[5], roe_curr[6], current_delta_B)
+#         roe_next = J_tf_inv_step * STM_step * J_t0_step * roe_vec_input
+        
+#         roe_curr = SVector{7,Float64}(Float64.(roe_next))
+#         new_M = mod(oe_c_curr.M + oe_c_curr.n * dt_control, 2*pi)
+#         new_omega = mod(oe_c_curr.omega + omega_dot_step * dt_control, 2*pi)
+#         new_RAAN = mod(oe_c_curr.RAAN + Omega_dot_step * dt_control, 2*pi)
+#         oe_c_curr = OrbitalElementsClassical(oe_c_curr.a, oe_c_curr.e, oe_c_curr.i, new_RAAN, new_omega, 0.0, oe_c_curr.n, new_M)
+#         current_delta_B = alpha * delta_B_command + (1.0 - alpha) * current_delta_B
+#         current_time += dt_control
+#     end
+#     record_state!(current_time, roe_curr, oe_c_curr, bias_offset, :Control, current_delta_B)
+
+#     println("  -> 最終到達地点 δλ: $(roe_curr[2] * oe_c_curr.a) [m]")
+
+#     # --- 5. プロット作成 (6分割) ---
+#     default(dpi=300, guidefontsize=9, tickfontsize=7, legendfontsize=7, titlefontsize=10, margin=3Plots.mm)
+    
+#     t_days = hist_t ./ 86400.0
+
+#     # P1: δλ
+#     p1 = plot(t_days, hist_dl, label="δλ", xlabel="Time [days]", ylabel="δλ [m]", title="Along-Track Drift", lw=2, legend=:topleft, bottom_margin=20Plots.mm, right_margin=20Plots.mm)
+#     vline!(p1, [drift_duration_days], label="Control", color=:gray, ls=:dash)
+    
+#     # P2: δa
+#     p2 = plot(t_days, hist_da, label="δa", xlabel="Time [days]", ylabel="δa [m]", title="Semi-Major Axis Diff", lw=2, color=:blue, legend=:outertopright, bottom_margin=20Plots.mm)
+#     vline!(p2, [drift_duration_days], label=false, color=:gray, ls=:dash)
+
+#     # P3: RT面内軌跡
+#     p3 = plot(hist_y, hist_x, label=false, xlabel="y [m]", ylabel="x [m]", title="RT-Plane Trajectory", aspect_ratio=:equal, lw=0.5, color=:gray, legend=:outertopright, top_margin=20Plots.mm, bottom_margin=20Plots.mm, right_margin=20Plots.mm)
+#     drift_idx = findall(x -> x == :Drift, hist_phase)
+#     ctrl_idx = findall(x -> x == :Control, hist_phase)
+#     if !isempty(ctrl_idx); push!(drift_idx, ctrl_idx[1]); end
+#     plot!(p3, hist_y[drift_idx], hist_x[drift_idx], label="Drift", lw=1.5, color=:blue)
+#     plot!(p3, hist_y[ctrl_idx], hist_x[ctrl_idx], label="Control", lw=2.0, color=:blue)
+#     scatter!(p3, [0], [0], label="Chief", marker=:circle, color=:black)
+    
+#     # P4: 相対距離
+#     p4 = plot(t_days, hist_dist, label="Distance", xlabel="Time [days]", ylabel="Dist [m]", title="Relative Distance", lw=2, color=:green, legend=:topleft, top_margin=20Plots.mm, bottom_margin=20Plots.mm)
+#     vline!(p4, [drift_duration_days], label=false, color=:gray, ls=:dash)
+
+#     # P5: δB (制御入力) ★追加
+#     p5 = plot(t_days, hist_db, label="δB", xlabel="Time [days]", ylabel="δB [-]", title="Control Input", lw=2, color=:orange, legend=:topright, top_margin=20Plots.mm, right_margin=20Plots.mm)
+#     vline!(p5, [drift_duration_days], label=false, color=:gray, ls=:dash)
+
+#     # P6: Z軸 (面外位置) ★追加
+#     p6 = plot(t_days, hist_z, label="z", xlabel="Time [days]", ylabel="z [m]", title="Cross-Track Motion", lw=1.5, color=:purple, legend=:outertopright, top_margin=20Plots.mm)
+#     vline!(p6, [drift_duration_days], label=false, color=:gray, ls=:dash)
+
+#     # 3x2 レイアウト
+#     p_combined = plot(p1, p2, p3, p4, p5, p6, layout=(3,2), size=(1100, 1200)) # 横幅も少し拡大    
+#     timestamp = Dates.format(now(), "yyyy-mm-dd_HH-MM-SS")
+#     filename = "full_mission_6panel_$(timestamp).png"
+#     savefig(p_combined, filename)
+#     println("グラフを保存しました: $filename")
+#     display(p_combined)
+# end
+
+# ==============================================================================
+#  分離からδaδiy制御収束まで(δiyは収束するがδλは拡大)
+# ==============================================================================
+function run_station_keeping_simulation()
+    println("\n" * "="^60)
+    println("定点保持制御シミュレーション (δiyドリフト抑制・Coupled Control)")
+    println("="^60)
+
+    # --- 0. 設定 ---
+    target_dlambda_meters = -60.0 # ユーザー設定
+    drift_duration_days = 1.0         
+    dv_R_input = 0.00 
+    
+    drift_duration_sec = drift_duration_days * 86400.0
+    control_duration_orbits = 100.0 # 長期制御で効果を見る
+
+    # --- 1. 初期パラメータとΔv設計 ---
+    n_init = sqrt(mu_earth / a_c_stm_init^3)
+    oe_c_init = OrbitalElementsClassical(a_c_stm_init, e_c_stm_init, i_c_stm_init, Omega_c_stm_init, omega_c_stm_init, 0.0, n_init, M_c_stm_init)
+    rho = RHO_LEO; Bc = BC_CHIEF; dB_natural = DELTA_B_INIT
+
+    omega_c_t0 = oe_c_init.omega
+    omega_dot, Omega_dot = get_secular_j2_rates_koenig(oe_c_init.a, oe_c_init.e, oe_c_init.i)
+    omega_c_tf = omega_c_t0 + omega_dot * drift_duration_sec
+    
+    J_t0 = get_J_qns_augmented_koenig(omega_c_t0)
+    J_tf_inv = get_J_qns_inv_augmented_koenig(omega_c_tf)
+    A_kep, A_j2, A_drag = get_A_prime_qns_augmented_koenig_selectable(oe_c_init.a, oe_c_init.e, oe_c_init.i, omega_c_t0, true, true, DENSITY_MODEL_SPECIFIC, rho, Bc)
+    STM_drift = get_STM_prime_qns_augmented_koenig_model_selectable(A_kep, A_j2, A_drag, drift_duration_sec, oe_c_init.e, true, DENSITY_MODEL_SPECIFIC)
+    M_trans = J_tf_inv * STM_drift * J_t0
+    u_0 = oe_c_init.M + oe_c_init.omega 
+    C_gve = 1.0 / (oe_c_init.n * oe_c_init.a)
+    
+    da_from_R, dl_from_R = 0.0, -2*C_gve*dv_R_input
+    dex_from_R, dey_from_R = C_gve*sin(u_0)*dv_R_input, -C_gve*cos(u_0)*dv_R_input
+    term_drift_drag = M_trans[2,7] * dB_natural
+    term_drift_R = M_trans[2,2]*dl_from_R + M_trans[2,3]*dex_from_R + M_trans[2,4]*dey_from_R
+    term_coeff_T = M_trans[2,1]*(2*C_gve) + M_trans[2,3]*(2*C_gve*cos(u_0)) + M_trans[2,4]*(2*C_gve*sin(u_0))
+    req_dv_T = (target_dlambda_meters / oe_c_init.a - term_drift_R - term_drift_drag) / term_coeff_T
+    
+    println("設計結果:")
+    println("  必要分離速度 ΔvT: $(req_dv_T) [m/s]")
+
+    # --- 2. シミュレーション準備 ---
+    da_0  = 2*C_gve*req_dv_T
+    dl_0  = -2*C_gve*dv_R_input
+    dex_0 = C_gve*(sin(u_0)*dv_R_input + 2*cos(u_0)*req_dv_T)
+    dey_0 = C_gve*(-cos(u_0)*dv_R_input + 2*sin(u_0)*req_dv_T)
+    roe_curr = SVector(da_0, dl_0, dex_0, dey_0, 0.0, 0.0, dB_natural)
+    oe_c_curr = oe_c_init
+    current_time = 0.0
+
+    hist_t = Float64[]
+    hist_dl = Float64[]
+    hist_da = Float64[]
+    hist_diy = Float64[] # ★追加: δiyの履歴
+    hist_dist = Float64[]
+    hist_x = Float64[]; hist_y = Float64[]; hist_z = Float64[]
+    hist_db = Float64[]
+    hist_phase = Symbol[] 
+
+    oe_d_0 = final_roe_to_deputy_oe(oe_c_curr, roe_curr)
+    sv_c_0 = orbital_elements_to_sv(oe_c_curr); sv_d_0 = orbital_elements_to_sv(oe_d_0)
+    r_c_0 = SVector(sv_c_0[1], sv_c_0[2], sv_c_0[3]); v_c_0 = SVector(sv_c_0[4], sv_c_0[5], sv_c_0[6])
+    r_d_0 = SVector(sv_d_0[1], sv_d_0[2], sv_d_0[3])
+    bias_offset = eci_to_rtn(r_c_0, v_c_0, r_d_0 - r_c_0)
+
+    function record_state!(t, roe, oe_c, bias, phase, db_val)
+        oe_d = final_roe_to_deputy_oe(oe_c, roe)
+        sv_c = orbital_elements_to_sv(oe_c); sv_d = orbital_elements_to_sv(oe_d)
+        r_c = SVector(sv_c[1], sv_c[2], sv_c[3]); v_c = SVector(sv_c[4], sv_c[5], sv_c[6])
+        r_d = SVector(sv_d[1], sv_d[2], sv_d[3])
+        dr_rtn = eci_to_rtn(r_c, v_c, r_d - r_c) - bias
+        
+        push!(hist_t, t)
+        push!(hist_dl, roe[2] * oe_c.a)
+        push!(hist_da, roe[1] * oe_c.a)
+        push!(hist_diy, roe[6] * oe_c.a) # δiy
+        push!(hist_dist, norm(dr_rtn))
+        push!(hist_x, dr_rtn[1]); push!(hist_y, dr_rtn[2]); push!(hist_z, dr_rtn[3])
+        push!(hist_db, db_val)
+        push!(hist_phase, phase)
+    end
+
+    # --- 3. フェーズ1: ドリフト期間 ---
+    println("Phase 1: ドリフト...")
+    dt_drift = 600.0
+    steps_drift = Int(drift_duration_sec / dt_drift)
+    
+    for i in 1:steps_drift
+        record_state!(current_time, roe_curr, oe_c_curr, bias_offset, :Drift, roe_curr[7])
+        # (伝播処理: 簡略化のため中身は省略せず書くのが安全だが、長くなるので前と同じロジック)
+        omega_c = oe_c_curr.omega
+        omega_dot_step, _ = get_secular_j2_rates_koenig(oe_c_curr.a, oe_c_curr.e, oe_c_curr.i)
+        omega_c_next = omega_c + omega_dot_step * dt_drift
+        J_t0_step = get_J_qns_augmented_koenig(omega_c)
+        J_tf_inv_step = get_J_qns_inv_augmented_koenig(omega_c_next)
+        A_kep, A_j2, A_drag = get_A_prime_qns_augmented_koenig_selectable(oe_c_curr.a, oe_c_curr.e, oe_c_curr.i, omega_c, true, true, DENSITY_MODEL_SPECIFIC, rho, Bc)
+        STM_step = get_STM_prime_qns_augmented_koenig_model_selectable(A_kep, A_j2, A_drag, dt_drift, oe_c_curr.e, true, DENSITY_MODEL_SPECIFIC)
+        roe_next = J_tf_inv_step * STM_step * J_t0_step * roe_curr
+        roe_curr = SVector{7,Float64}(Float64.(roe_next))
+        new_M = mod(oe_c_curr.M + oe_c_curr.n * dt_drift, 2*pi)
+        new_omega = mod(oe_c_curr.omega + omega_dot_step * dt_drift, 2*pi)
+        new_RAAN = mod(oe_c_curr.RAAN + 0.0, 2*pi)
+        oe_c_curr = OrbitalElementsClassical(oe_c_curr.a, oe_c_curr.e, oe_c_curr.i, new_RAAN, new_omega, 0.0, oe_c_curr.n, new_M)
+        current_time += dt_drift
+    end
+
+    # --- 4. フェーズ2: 制御期間 (δiy制御追加) ---
+    println("Phase 2: 制御開始 (δiyフィードバック付き)...")
+    
+    control_duration_sec = control_duration_orbits * (2*pi/oe_c_curr.n)
+    dt_control = SIM_SEGMENT_ORBITS * (2*pi/oe_c_curr.n)
+    steps_control = Int(control_duration_sec / dt_control)
+    
+    # 制御パラメータ
+    GAIN_DA = 1.5  # δa制御ゲイン (Inner Loop)
+    GAIN_IY = 0.5   # δiy制御ゲイン (Outer Loop: 小さめにする)
+    
+    # 目標
+    target_dl = target_dlambda_meters / oe_c_init.a
+    target_diy = 0.0 # δiyをゼロにしたい
+    
+    current_delta_B = roe_curr[7]
+    alpha = 1.0 - exp(-dt_control / ATTITUDE_CHANGE_TIMECONSTANT_SEC)
+    
+    for i in 1:steps_control
+        record_state!(current_time, roe_curr, oe_c_curr, bias_offset, :Control, current_delta_B)
+
+        # --- A. Outer Loop: δiyを直すための目標δaを決める ---
+        # δiyの誤差
+        err_diy = roe_curr[6] - target_diy
+        
+        # 感度係数 (∂Ωdot / ∂a) の概算
+        # Ωdot ∝ a^-3.5 なので、感度は -3.5 * Ωdot / a
+        # δiy_dot ∝ -3.5 * Ωdot * sin(i) / a * δa
+        # 非常に小さい値なので、単純なP制御で方向を決める
+        
+        # 必要なδa (符号に注意: δa下げるとΩdot速くなる→相対的に追いつく？)
+        # J2係数(負)を考慮すると、符号関係は複雑だが、シミュレーションで調整
+        # 通常: δiy > 0 なら δa > 0 にして修正
+        
+        # δiyの制御入力をδaの目標値に上乗せ
+        # ただし、δλへの影響が甚大なので、リミッターをかける
+        da_ref_from_diy = GAIN_IY * err_diy 
+        da_ref_from_diy = clamp(da_ref_from_diy, -50.0/oe_c_curr.a, 50.0/oe_c_curr.a) # 最大50m程度のδaに制限
+        
+        # --- B. Inner Loop: δaを目標値にするためのδBを決める ---
+        # 目標δa = 0 (静止) + δiy補正分
+        target_da_total = 0.0 + da_ref_from_diy
+        
+        err_da_meters = (roe_curr[1] - target_da_total) * oe_c_curr.a
+        
+        delta_B_req = err_da_meters * GAIN_DA
+        delta_B_command = clamp(delta_B_req, DELTA_B_MIN, DELTA_B_MAX)
+        
+        # --- C. 伝播 ---
+        omega_dot_step, _ = get_secular_j2_rates_koenig(oe_c_curr.a, oe_c_curr.e, oe_c_curr.i)
+        omega_c_next = oe_c_curr.omega + omega_dot_step * dt_control
+        J_t0_step = get_J_qns_augmented_koenig(oe_c_curr.omega)
+        J_tf_inv_step = get_J_qns_inv_augmented_koenig(omega_c_next)
+        A_kep, A_j2, A_drag = get_A_prime_qns_augmented_koenig_selectable(oe_c_curr.a, oe_c_curr.e, oe_c_curr.i, oe_c_curr.omega, true, true, DENSITY_MODEL_SPECIFIC, rho, Bc)
+        STM_step = get_STM_prime_qns_augmented_koenig_model_selectable(A_kep, A_j2, A_drag, dt_control, oe_c_curr.e, true, DENSITY_MODEL_SPECIFIC)
+        
+        roe_vec_input = SVector(roe_curr[1], roe_curr[2], roe_curr[3], roe_curr[4], roe_curr[5], roe_curr[6], current_delta_B)
+        roe_next = J_tf_inv_step * STM_step * J_t0_step * roe_vec_input
+        roe_curr = SVector{7,Float64}(Float64.(roe_next))
+        
+        new_M = mod(oe_c_curr.M + oe_c_curr.n * dt_control, 2*pi)
+        new_omega = mod(oe_c_curr.omega + omega_dot_step * dt_control, 2*pi)
+        new_RAAN = mod(oe_c_curr.RAAN + 0.0, 2*pi)
+        oe_c_curr = OrbitalElementsClassical(oe_c_curr.a, oe_c_curr.e, oe_c_curr.i, new_RAAN, new_omega, 0.0, oe_c_curr.n, new_M)
+        current_delta_B = alpha * delta_B_command + (1.0 - alpha) * current_delta_B
+        current_time += dt_control
+    end
+    record_state!(current_time, roe_curr, oe_c_curr, bias_offset, :Control, current_delta_B)
+
+    # --- 5. プロット ---
+    default(dpi=300, guidefontsize=9, tickfontsize=7, legendfontsize=7, titlefontsize=10, margin=3Plots.mm, right_margin=20Plots.mm)
+    t_days = hist_t ./ 86400.0
+    
+    p1 = plot(t_days, hist_dl, label="δλ", xlabel="Time [days]", ylabel="δλ [m]", title="Along-Track Drift", lw=2, legend=:topleft)
+    vline!(p1, [drift_duration_days], label="Control", color=:gray, ls=:dash)
+    
+    p2 = plot(t_days, hist_da, label="δa", xlabel="Time [days]", ylabel="δa [m]", title="Semi-Major Axis Diff", lw=2, color=:blue, legend=:outertopright)
+    vline!(p2, [drift_duration_days], label=false, color=:gray, ls=:dash)
+
+    p3 = plot(hist_y, hist_x, label=false, xlabel="y [m]", ylabel="x [m]", title="RT-Plane", aspect_ratio=:equal, lw=0.5, color=:gray)
+    drift_idx = findall(x -> x == :Drift, hist_phase); ctrl_idx = findall(x -> x == :Control, hist_phase)
+    if !isempty(ctrl_idx); push!(drift_idx, ctrl_idx[1]); end
+    plot!(p3, hist_y[drift_idx], hist_x[drift_idx], label="Drift", lw=1.5, color=:blue)
+    plot!(p3, hist_y[ctrl_idx], hist_x[ctrl_idx], label="Control", lw=2.0, color=:red)
+    
+    p4 = plot(t_days, hist_dist, label="Distance", xlabel="Time [days]", ylabel="Dist [m]", title="Rel Dist", lw=2, color=:green, legend=:topright)
+    
+    p5 = plot(t_days, hist_db, label="δB", xlabel="Time [days]", ylabel="δB [-]", title="Control Input", lw=2, color=:orange, legend=:topright)
+    
+    # ★追加: δiyの推移も確認
+    p6 = plot(t_days, hist_z, label="z", xlabel="Time [days]", ylabel="z [m]", title="Cross-Track (z)", lw=1.5, color=:purple, legend=:outertopright)
+    vline!(p6, [drift_duration_days], label=false, color=:gray, ls=:dash)
+
+    p_combined = plot(p1, p2, p3, p4, p5, p6, layout=(3,2), size=(1100, 1200))
+    
+    timestamp = Dates.format(now(), "yyyy-mm-dd_HH-MM-SS")
+    filename = "station_keeping_coupled_$(timestamp).png"
+    savefig(p_combined, filename)
+    println("グラフを保存しました: $filename")
+    display(p_combined)
+end
+# 実行
+run_station_keeping_simulation()
+
+# ==============================================================================
+# [修正版] シーケンシャル制御 (Step 1: δiy修正 -> Step 2: δλ修正)(上手く言ってない)
+# ==============================================================================
+function run_sequential_control_simulation()
+    println("\n" * "="^60)
+    println("シーケンシャル軌道制御シミュレーション")
+    println(" (優先度: 面外δiy -> 面内δλ)")
+    println("="^60)
+
+    # --- 0. 設定 ---
+    target_dlambda_meters = -60.0 # 最終目標位置
+    drift_duration_days = 1.0     # 初期ドリフト期間
+    
+    # 制御期間を長めに設定 (J2の効きが悪いため時間がかかる)
+    control_duration_orbits = 300.0 
+    
+    # --- 1. 初期条件計算 (前回のコードと同様) ---
+    n_init = sqrt(mu_earth / a_c_stm_init^3)
+    oe_c_init = OrbitalElementsClassical(a_c_stm_init, e_c_stm_init, i_c_stm_init, Omega_c_stm_init, omega_c_stm_init, 0.0, n_init, M_c_stm_init)
+    rho = RHO_LEO; Bc = BC_CHIEF; dB_natural = DELTA_B_INIT
+
+    # ドリフト後の状態計算
+    drift_duration_sec = drift_duration_days * 86400.0
+    omega_dot, Omega_dot = get_secular_j2_rates_koenig(oe_c_init.a, oe_c_init.e, oe_c_init.i)
+    
+    # 簡単のため、ドリフト計算は省略し、t=1.0日後の状態からスタートさせる
+    # (実際には前のコード同様にSTMで飛ばすが、ここでは制御ロジックに集中するため初期値を設定)
+    # ※前のシミュレーション結果に近い値を模擬的に初期値とします
+    
+    # 想定される1日後の状態 (ドリフトでδλが流れ、δiyも少しズレているとする)
+    # δa=0 (ドリフト中は減衰するが、制御開始時に一度リセットして考える)
+    roe_current = SVector(
+        0.0,                # δa (一旦静止)
+        -100.0/oe_c_init.a, # δλ (目標-60mに対して、現在は-100mにいるとする)
+        0.0, 0.0, 0.0,      # δe, δix
+        20.0/oe_c_init.a,   # δiy (20mの面外ズレが発生していると仮定)
+        dB_natural
+    )
+    
+    oe_c_curr = oe_c_init
+    current_time = 0.0
+    
+    # 履歴用
+    hist_t = Float64[]
+    hist_dl = Float64[]
+    hist_da = Float64[]
+    hist_diy = Float64[]
+    hist_z = Float64[]
+    hist_mode = Float64[] # 制御モード記録 (1: δiy, 2: δλ, 3: Keep)
+
+    # 制御パラメータ
+    GAIN_DA = 1.5  # インナーループ (δa追従用)
+    
+    # モード判定しきい値
+    TOL_DIY = 1.0   # [m] δiyの許容誤差
+    TOL_DL  = 5.0   # [m] δλの許容誤差
+    
+    # 目標δaの設定値 (m)
+    # δiyを直すときは大きく動かす必要があるが、空気抵抗の限界がある
+    # ここでは、空気抵抗で作れる現実的なδaとして ±100m 程度を上限とする
+    DA_FOR_DIY = 80.0 
+    DA_FOR_DL  = 30.0 
+
+    println("制御開始: 初期誤差 δλ=-100m, δiy=20m")
+    println("目標: δλ=$(target_dlambda_meters)m, δiy=0m")
+
+    # --- シミュレーションループ ---
+    dt_control = SIM_SEGMENT_ORBITS * (2*pi/oe_c_curr.n)
+    steps = Int(control_duration_orbits / SIM_SEGMENT_ORBITS)
+    
+    # 状態変数の初期化
+    current_delta_B = roe_current[7]
+    alpha = 1.0 - exp(-dt_control / ATTITUDE_CHANGE_TIMECONSTANT_SEC)
+    
+    mode = 1 # 初期モード: δiy修正
+    
+    for i in 1:steps
+        # 現在の誤差 (メートル換算)
+        val_dl  = roe_current[2] * oe_c_curr.a
+        val_da  = roe_current[1] * oe_c_curr.a
+        val_diy = roe_current[6] * oe_c_curr.a
+        
+        err_dl  = val_dl - target_dlambda_meters
+        err_diy = val_diy - 0.0
+        
+        # --- モード切替ロジック (ステートマシン) ---
+        target_da_meter = 0.0
+        
+        if mode == 1
+            # 【Phase 1: δiy 修正モード】
+            # 面外ズレが大きいうちは、δλを無視してδiyを直す
+            if abs(err_diy) < TOL_DIY
+                mode = 2 # 修正完了 -> 次へ
+            else
+                # δiyを減らすためのδaを設定
+                # (符号の関係: 軌道解析に基づく。通常、高度を下げるとΩdotが速くなり追いつく等)
+                # ここでは仮に、err_diyと逆符号のδaを入れると収束すると仮定して実装
+                # ※厳密にはJ2係数と傾斜角に依存。シミュレーションで挙動確認して符号反転が必要かも。
+                target_da_meter = sign(err_diy) * DA_FOR_DIY
+            end
+            
+        elseif mode == 2
+            # 【Phase 2: δλ 修正モード】
+            # δiyはOKなので、ズレてしまったδλを急いで戻す
+            if abs(err_dl) < TOL_DL
+                mode = 3 # 修正完了 -> 維持へ
+            else
+                # δλを戻すためのδaを設定
+                # δλ_dot ≈ -1.5 n δa なので、
+                # δλをプラスにしたい(戻したい)なら、δaはマイナスにする必要あり
+                # target_da ∝ - (target - current) = - (-err) = err
+                # つまり、err_dlと同じ符号のδaを作ればよい
+                target_da_meter = sign(err_dl) * DA_FOR_DL
+            end
+            
+        elseif mode == 3
+            # 【Phase 3: 維持モード】
+            # 両方OKなので、δa=0にしてその場に止まる
+            # (微修正のためP制御を入れても良いが、今回は完全停止を狙う)
+            target_da_meter = 0.0
+            
+            # もし誤差が再拡大したらモードを戻すリセットを入れることも可能
+            if abs(err_diy) > TOL_DIY * 2.0; mode = 1; end
+            if abs(err_dl)  > TOL_DL * 2.0;  mode = 2; end
+        end
+        
+        # --- δa制御 (インナーループ) ---
+        # 決定した target_da_meter になるように空気抵抗(δB)を操作
+        err_da_ctrl = val_da - target_da_meter
+        delta_B_req = err_da_ctrl * GAIN_DA
+        delta_B_command = clamp(delta_B_req, DELTA_B_MIN, DELTA_B_MAX)
+        
+        # --- 状態保存 ---
+        push!(hist_t, current_time)
+        push!(hist_dl, val_dl)
+        push!(hist_da, val_da)
+        push!(hist_diy, val_diy)
+        push!(hist_mode, Float64(mode))
+        
+        # z位置の概算 (δiy * a * sin(theta)) 振幅として記録
+        push!(hist_z, abs(val_diy)) 
+
+        # --- 伝播 (1ステップ) ---
+        omega_dot_step, _ = get_secular_j2_rates_koenig(oe_c_curr.a, oe_c_curr.e, oe_c_curr.i)
+        omega_c_next = oe_c_curr.omega + omega_dot_step * dt_control
+        J_t0_step = get_J_qns_augmented_koenig(oe_c_curr.omega)
+        J_tf_inv_step = get_J_qns_inv_augmented_koenig(omega_c_next)
+        A_kep, A_j2, A_drag = get_A_prime_qns_augmented_koenig_selectable(oe_c_curr.a, oe_c_curr.e, oe_c_curr.i, oe_c_curr.omega, true, true, DENSITY_MODEL_SPECIFIC, rho, Bc)
+        STM_step = get_STM_prime_qns_augmented_koenig_model_selectable(A_kep, A_j2, A_drag, dt_control, oe_c_curr.e, true, DENSITY_MODEL_SPECIFIC)
+        
+        roe_vec_input = SVector(roe_current[1], roe_current[2], roe_current[3], roe_current[4], roe_current[5], roe_current[6], current_delta_B)
+        roe_next = J_tf_inv_step * STM_step * J_t0_step * roe_vec_input
+        
+        roe_current = SVector{7,Float64}(Float64.(roe_next))
+        new_M = mod(oe_c_curr.M + oe_c_curr.n * dt_control, 2*pi)
+        new_omega = mod(oe_c_curr.omega + omega_dot_step * dt_control, 2*pi)
+        oe_c_curr = OrbitalElementsClassical(oe_c_curr.a, oe_c_curr.e, oe_c_curr.i, oe_c_curr.RAAN, new_omega, 0.0, oe_c_curr.n, new_M)
+        
+        current_delta_B = alpha * delta_B_command + (1.0 - alpha) * current_delta_B
+        current_time += dt_control
+    end
+
+    # --- プロット ---
+    default(dpi=300, guidefontsize=9, tickfontsize=7, legendfontsize=7, margin=5Plots.mm)
+    t_days = hist_t ./ 86400.0
+    
+    # モードの可視化用背景
+    function plot_background!(p)
+        # 背景色を変える等は難しいので、モード値を別グラフで表示
+    end
+
+    p1 = plot(t_days, hist_dl, label="δλ", ylabel="[m]", title="Along-Track (δλ)", lw=2)
+    hline!(p1, [target_dlambda_meters], label="Target", ls=:dash, color=:black)
+    
+    p2 = plot(t_days, hist_da, label="δa", ylabel="[m]", title="Semi-Major Axis (δa)", lw=2, color=:blue)
+    
+    p3 = plot(t_days, hist_diy, label="δiy", ylabel="[m]", title="Cross-Track Drift (δiy)", lw=2, color=:purple)
+    hline!(p3, [0.0], label="Target", ls=:dash, color=:black)
+    
+    p4 = plot(t_days, hist_mode, label="Mode", ylabel="1:FixIY, 2:FixDL, 3:Keep", title="Control Phase", lw=2, color=:orange, yticks=[1,2,3])
+
+    p_combined = plot(p1, p2, p3, p4, layout=(2,2), size=(1000, 800))
+    
+    timestamp = Dates.format(now(), "yyyy-mm-dd_HH-MM-SS")
+    filename = "sequential_control_$(timestamp).png"
+    savefig(p_combined, filename)
+    println("グラフを保存しました: $filename")
+    display(p_combined)
+end
+
+# ==============================================================================
+# [修正版] δiyとδλの同時協調制御 (Weighted Feedback Control)
+# ==============================================================================
+function run_coordinated_control_simulation()
+    println("\n" * "="^60)
+    println("協調制御シミュレーション (δiyとδλのバランス制御)")
+    println("="^60)
+
+    # --- 設定 ---
+    target_dlambda_meters = -60.0
+    control_duration_orbits = 300.0 # 約20日
+    
+    # --- 初期化 (前回と同じ悪い初期条件: δλ=-100m, δiy=20m) ---
+    n_init = sqrt(mu_earth / a_c_stm_init^3)
+    oe_c_init = OrbitalElementsClassical(a_c_stm_init, e_c_stm_init, i_c_stm_init, Omega_c_stm_init, omega_c_stm_init, 0.0, n_init, M_c_stm_init)
+    rho = RHO_LEO; Bc = BC_CHIEF; dB_natural = DELTA_B_INIT
+    
+    roe_current = SVector(
+        0.0,                
+        -100.0/oe_c_init.a, 
+        0.0, 0.0, 0.0,      
+        20.0/oe_c_init.a,   
+        dB_natural
+    )
+    oe_c_curr = oe_c_init
+    current_time = 0.0
+    
+    # 履歴
+    hist_t = Float64[]; hist_dl = Float64[]; hist_da = Float64[]; hist_diy = Float64[]
+
+    # --- 制御ゲインの設計 ---
+    # δiy は動きが遅いのでゲインを大きく、δλ は敏感なのでゲインを小さくする
+    # 感度解析の結果から、δλはδaに対して数万倍敏感、δiyは数倍程度
+    
+    # δiyを1m直すのに必要なδaの重み
+    K_IY = 10.0  
+    # δλを1m直すのに必要なδaの重み (非常に小さくしないと暴れる)
+    K_DL = 0.001 
+
+    println("制御開始: 同時フィードバック")
+
+    dt_control = SIM_SEGMENT_ORBITS * (2*pi/oe_c_curr.n)
+    steps = Int(control_duration_orbits / SIM_SEGMENT_ORBITS)
+    alpha = 1.0 - exp(-dt_control / ATTITUDE_CHANGE_TIMECONSTANT_SEC)
+    current_delta_B = roe_current[7]
+
+    for i in 1:steps
+        # 現在の状態
+        val_dl  = roe_current[2] * oe_c_curr.a
+        val_da  = roe_current[1] * oe_c_curr.a
+        val_diy = roe_current[6] * oe_c_curr.a
+        
+        err_dl  = val_dl - target_dlambda_meters
+        err_diy = val_diy - 0.0
+        
+        # --- 協調制御則 ---
+        # δiyを直すための要求δa (符号はシミュレーション挙動に合わせて調整: ここでは逆符号と仮定)
+        req_da_from_diy = -K_IY * err_diy
+        
+        # δλを直すための要求δa (δλを戻すには同符号のδaが必要)
+        req_da_from_dl  = +K_DL * err_dl
+        
+        # 合算 (これが「妥協点」となる目標δa)
+        target_da_total = req_da_from_diy + req_da_from_dl
+        
+        # 安全のためリミッター (±100m以内のδaで運用)
+        target_da_total = clamp(target_da_total, -100.0/oe_c_curr.a, 100.0/oe_c_curr.a)
+        
+        # --- インナーループ (δa追従) ---
+        err_da_ctrl = val_da - target_da_total
+        delta_B_req = err_da_ctrl * 1.5 # GAIN_DA
+        delta_B_command = clamp(delta_B_req, DELTA_B_MIN, DELTA_B_MAX)
+        
+        # 保存
+        push!(hist_t, current_time); push!(hist_dl, val_dl); push!(hist_da, val_da); push!(hist_diy, val_diy)
+        
+        # 伝播
+        omega_dot_step, _ = get_secular_j2_rates_koenig(oe_c_curr.a, oe_c_curr.e, oe_c_curr.i)
+        omega_c_next = oe_c_curr.omega + omega_dot_step * dt_control
+        J_t0_step = get_J_qns_augmented_koenig(oe_c_curr.omega)
+        J_tf_inv_step = get_J_qns_inv_augmented_koenig(omega_c_next)
+        A_kep, A_j2, A_drag = get_A_prime_qns_augmented_koenig_selectable(oe_c_curr.a, oe_c_curr.e, oe_c_curr.i, oe_c_curr.omega, true, true, DENSITY_MODEL_SPECIFIC, rho, Bc)
+        STM_step = get_STM_prime_qns_augmented_koenig_model_selectable(A_kep, A_j2, A_drag, dt_control, oe_c_curr.e, true, DENSITY_MODEL_SPECIFIC)
+        
+        roe_vec_input = SVector(roe_current[1], roe_current[2], roe_current[3], roe_current[4], roe_current[5], roe_current[6], current_delta_B)
+        roe_next = J_tf_inv_step * STM_step * J_t0_step * roe_vec_input
+        roe_current = SVector{7,Float64}(Float64.(roe_next))
+        
+        new_M = mod(oe_c_curr.M + oe_c_curr.n * dt_control, 2*pi)
+        new_omega = mod(oe_c_curr.omega + omega_dot_step * dt_control, 2*pi)
+        oe_c_curr = OrbitalElementsClassical(oe_c_curr.a, oe_c_curr.e, oe_c_curr.i, oe_c_curr.RAAN, new_omega, 0.0, oe_c_curr.n, new_M)
+        current_delta_B = alpha * delta_B_command + (1.0 - alpha) * current_delta_B
+        current_time += dt_control
+    end
+
+    # プロット
+    default(dpi=300, guidefontsize=9, tickfontsize=7, legendfontsize=7, margin=5Plots.mm)
+    t_days = hist_t ./ 86400.0
+    
+    p1 = plot(t_days, hist_dl, label="δλ", ylabel="[m]", title="Along-Track", lw=2)
+    hline!(p1, [target_dlambda_meters], label="Target", ls=:dash, color=:black)
+    
+    p2 = plot(t_days, hist_da, label="δa", ylabel="[m]", title="Semi-Major Axis", lw=2, color=:blue)
+    
+    p3 = plot(t_days, hist_diy, label="δiy", ylabel="[m]", title="Cross-Track Drift", lw=2, color=:purple)
+    hline!(p3, [0.0], label="Target", ls=:dash, color=:black)
+    
+    p_combined = plot(p1, p2, p3, layout=(3,1), size=(800, 800))
+    
+    timestamp = Dates.format(now(), "yyyy-mm-dd_HH-MM-SS")
+    filename = "coordinated_control_$(timestamp).png"
+    savefig(p_combined, filename)
+    display(p_combined)
+end
+
+
+# 実行
+run_sequential_control_simulation()
+
+run_coordinated_control_simulation()
